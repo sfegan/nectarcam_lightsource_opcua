@@ -15,11 +15,11 @@ The three components can be used together to test the server. In three terminal 
 
 ### Terminal 2: run the OPC UA server
 
-`#python3 nc_lightsource_opcua_server.py --opcua-endpoint=opc.tcp://localhost:4840/nectarcam/ --address=localhost --passwd HELLO --product-code 0x15`
+`# python3 nc_lightsource_opcua_server.py --opcua-endpoint=opc.tcp://localhost:4840/nectarcam/ --address=localhost --passwd HELLO --product-code 0x15`
 
 ### Terminal 3: run the OPC UA test CLI
 
-`#nc_lightsource_opcua_test_cli.py --endpoint opc.tcp://localhost:4840/nectarcam/`
+`# python3 nc_lightsource_opcua_test_cli.py --endpoint opc.tcp://localhost:4840/nectarcam/`
 
 
 
