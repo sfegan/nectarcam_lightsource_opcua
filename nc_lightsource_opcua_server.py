@@ -599,7 +599,6 @@ class CalBoxHardware:
 
         # Detect release from the frame before constructing CalBoxConfig
         self.release = CalBoxConfig.software_version_from_buf(raw_with_crlf)
-        log.info("Device software release: %d", self.release)
 
         cfg = CalBoxConfig(self.product_code, self.release)
         cfg.from_status(raw_with_crlf)
