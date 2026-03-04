@@ -46,6 +46,27 @@ logging.basicConfig(
 log = logging.getLogger("cta.nectarcam.cls.server")
 
 
+class _SuppressUaStatusCodeTracebacks(logging.Filter):
+    """
+    Attached to the ``opcua.server.address_space`` logger.
+
+    python-opcua logs a full traceback whenever a method callback raises
+    *any* exception, including the intentional ``ua.UaStatusCodeError`` that
+    we raise to signal a clean OPC-UA-level failure (Bad status) to the
+    client.  This filter downgrades those records to WARNING and strips the
+    exc_info so no traceback appears in the output.  All other records pass
+    through unchanged.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info:
+            exc = record.exc_info[1]
+            if isinstance(exc, ua.UaStatusCodeError):
+                # Re-emit as a terse WARNING with no traceback
+                log.warning("OPC UA method returned Bad status: %s", exc)
+                return False   # drop the original noisy ERROR record
+        return True
+
+
 # ==========================================================
 # FSM States
 # ==========================================================
@@ -742,6 +763,8 @@ class CalibrationBoxServer:
         product_code:     int  = 0,
         opcua_endpoint:   str  = "opc.tcp://0.0.0.0:4840/nectarcam/",
         opcua_users:      dict = None,
+        poll_interval:    float = 1.0,
+        auto_reconnect:   bool  = False,
     ):
         self.device_root_name = device_root_name
         self.opcua_users      = opcua_users or {}
@@ -766,8 +789,15 @@ class CalibrationBoxServer:
         self._create_methods()
 
         self.hardware = CalBoxHardware(address, port, password, product_code)
-        self.state    = DeviceState.Disabled
+        self.state    = DeviceState.Offline
         self._running = False
+        self.poll_interval   = poll_interval
+        self.auto_reconnect  = auto_reconnect
+
+        # Suppress traceback noise for expected UaStatusCodeError failures
+        logging.getLogger("opcua.server.address_space").addFilter(
+            _SuppressUaStatusCodeTracebacks()
+        )
 
     # ----------------------------------------------------------
     def _user_manager(self, isession, username, password):
@@ -849,17 +879,39 @@ class CalibrationBoxServer:
            ua.VariantType.Float])    # central_current
 
     # ----------------------------------------------------------
+    # Post-command status refresh
+    # ----------------------------------------------------------
+    def _schedule_status_refresh(self, delay: float = 0.050):
+        """
+        Fire a get_status after *delay* seconds in a throw-away thread.
+        This runs outside any lock, so it re-enters via the normal
+        public get_status() path which acquires the hardware lock itself.
+        """
+        def _refresh():
+            time.sleep(delay)
+            try:
+                cfg = self.hardware.get_status()
+                self._apply_config(cfg)
+            except Exception as exc:
+                log.debug("Post-command status refresh failed: %s", exc)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    # ----------------------------------------------------------
     # Method implementations
     # ----------------------------------------------------------
-    def _dispatch(self, hw_call) -> list:
-        """Call hw_call(), push the resulting CalBoxConfig to OPC UA nodes."""
+    def _dispatch(self, hw_call, refresh: bool = True) -> list:
+        """Call hw_call(), push the resulting CalBoxConfig to OPC UA nodes.
+        If *refresh* is True, schedule a follow-up get_status after 50 ms."""
         try:
             cfg = hw_call()
             if cfg is not None:
                 self._apply_config(cfg)
         except Exception as exc:
-            log.error("Command failed: %s", exc)
+            log.warning("Command failed: %s", exc)
             raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
+        if refresh:
+            self._schedule_status_refresh()
         return []
 
     @unwrap_variants
@@ -875,7 +927,7 @@ class CalibrationBoxServer:
         try:
             self.hardware.reboot()
         except Exception as exc:
-            log.error("Reboot failed: %s", exc)
+            log.warning("Reboot failed: %s", exc)
             raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
         return []
 
@@ -884,17 +936,20 @@ class CalibrationBoxServer:
         self.hardware.close()
         time.sleep(2)
         if self.hardware.connect() and self.hardware.authenticate():
+            log.info("Reconnect succeeded.")
             self.state = DeviceState.Disabled
+            self._set_var("cls_state", int(self.state))
+            self._schedule_status_refresh()
+            return []
         else:
+            log.warning("Reconnect failed — device still offline.")
             self.state = DeviceState.Offline
             self._set_var("cls_state", int(self.state))
             raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
-        self._set_var("cls_state", int(self.state))
-        return []
 
     @unwrap_variants
     def _m_get_status(self, parent):
-        return self._dispatch(self.hardware.get_status)
+        return self._dispatch(self.hardware.get_status, refresh=False)
 
     @unwrap_variants
     def _m_set_leds(self, parent, mask: int):
@@ -970,7 +1025,7 @@ class CalibrationBoxServer:
         self._set_var("cls_state", int(self.state))
 
     # ----------------------------------------------------------
-    # Background poll  (1 Hz)
+    # Background poll
     # ----------------------------------------------------------
     def _poll_hardware(self):
         while self._running:
@@ -981,26 +1036,44 @@ class CalibrationBoxServer:
                 self._apply_config(cfg)
             except Exception as exc:
                 if self.state != DeviceState.Offline:
-                    # Log the transition to Offline once, not on every poll tick
                     log.error("Poll failed, marking Offline: %s", exc)
                     self.state = DeviceState.Offline
                     self._set_var("cls_state", int(self.state))
-            time.sleep(1)
+                elif self.auto_reconnect:
+                    log.info("Auto-reconnect: attempting to reconnect …")
+                    self.hardware.close()
+                    if self.hardware.connect() and self.hardware.authenticate():
+                        log.info("Auto-reconnect succeeded.")
+                        self._schedule_status_refresh()
+                    else:
+                        log.warning("Auto-reconnect failed, will retry.")
+            time.sleep(self.poll_interval)
 
     # ----------------------------------------------------------
     # Lifecycle
     # ----------------------------------------------------------
     def start(self):
-        if not self.hardware.connect():
-            raise RuntimeError("Failed to connect to calibration box")
-        if not self.hardware.authenticate():
-            raise RuntimeError("Failed to authenticate with calibration box")
+        connected = self.hardware.connect() and self.hardware.authenticate()
+        if connected:
+            self.state = DeviceState.Disabled
+            log.info("Connected to calibration box.")
+        else:
+            self.state = DeviceState.Offline
+            log.warning(
+                "Could not connect to calibration box at startup — "
+                "starting in Offline mode.%s",
+                " Auto-reconnect is enabled." if self.auto_reconnect else
+                " Use the Reconnect method or restart with --auto-reconnect."
+            )
 
-        self._set_var("cls_state", int(DeviceState.Disabled))
+        self._set_var("cls_state", int(self.state))
         self._running = True
         self.server.start()
         log.info("OPC UA server started: %s",
                  self.server.endpoint.geturl())
+
+        if connected:
+            self._schedule_status_refresh()
 
         threading.Thread(target=self._poll_hardware, daemon=True).start()
         log.info("Polling thread started. Press Ctrl-C to stop.")
@@ -1040,6 +1113,10 @@ def parse_args():
                    help="OPC UA username:password pair (repeatable)")
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    p.add_argument("--poll-interval", type=float, default=1.0, metavar="SECONDS",
+                   help="Hardware polling interval in seconds (default: 1.0)")
+    p.add_argument("--auto-reconnect", action="store_true",
+                   help="Automatically attempt to reconnect when the device goes offline")
     return p.parse_args()
 
 
@@ -1064,4 +1141,6 @@ if __name__ == "__main__":
         product_code     = args.product_code,
         opcua_endpoint   = args.opcua_endpoint,
         opcua_users      = opcua_users,
+        poll_interval    = args.poll_interval,
+        auto_reconnect   = args.auto_reconnect,
     ).start()
