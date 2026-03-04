@@ -11,11 +11,11 @@ The three components can be used together to test the server. In three terminal 
 
 ### Terminal 1: run the light source emulator
 
-`# python3 nc_lightsource_emulator.py --password HELLO --log-level=ERROR --product-code 0x15`
+`# python3 nc_lightsource_emulator.py --password HELLO --log-level=ERROR --product-code 0xA5`
 
 ### Terminal 2: run the OPC UA server
 
-`# python3 nc_lightsource_opcua_server.py --opcua-endpoint=opc.tcp://localhost:4840/nectarcam/ --address=localhost --passwd HELLO --product-code 0x15`
+`# python3 nc_lightsource_opcua_server.py --opcua-endpoint=opc.tcp://localhost:4840/nectarcam/ --address=localhost --passwd HELLO --product-code 0xA5`
 
 ### Terminal 3: run the OPC UA test CLI
 

@@ -43,7 +43,7 @@ log = logging.getLogger("cta.nectarcam.cls.emulator")
 # ==========================================================
 class ProductCode(IntEnum):
     SPE = 0xAA
-    FF  = 0x15
+    FF  = 0xA5
 
 
 class Cmd(IntEnum):
@@ -54,7 +54,7 @@ class Cmd(IntEnum):
 
 
 MINIMAL_STATUS_SIZE  = 24
-_CENTRAL_CURRENT_STEP_MA = 0.1
+_CENTRAL_CURRENT_STEP_MA = 12.0/31457
 
 
 # ==========================================================
@@ -311,6 +311,7 @@ class FrameCodec:
     @staticmethod
     def encode_central_current(mA: float) -> tuple:
         code = int(mA / _CENTRAL_CURRENT_STEP_MA)
+        code = max(min(code, 31457), 0)
         return tuple(0x40 | (0x1F & (code >> ((3-i)*5))) for i in range(4))
 
     @staticmethod
@@ -686,7 +687,7 @@ def parse_args():
     p.add_argument("--port",         type=int,             default=50001,
                    help="TCP port to listen on (default: 50001)")
     p.add_argument("--product-code", type=lambda x: int(x, 0), default=0xAA,
-                   help="Product code: 0xAA=SPE (default), 0x15=FF")
+                   help="Product code: 0xAA=SPE (default), 0xA5=FF")
     p.add_argument("--release",      type=int,             default=6,
                    help="Firmware release number (default: 6)")
     p.add_argument("--password",     default="",

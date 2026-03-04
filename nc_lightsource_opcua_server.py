@@ -61,7 +61,7 @@ class DeviceState(IntEnum):
 # ==========================================================
 class ProductCode(IntEnum):
     SPE = 0xAA   # SPE box  (33-byte status)
-    FF  = 0x15   # FF  box  (29 or 32-byte status depending on release)
+    FF  = 0xA5   # FF  box  (29 or 32-byte status depending on release)
 
 
 # ==========================================================
@@ -83,7 +83,7 @@ _AIVFF_STATUS_MASK = bytes.fromhex("202020404040406060606F737F606060606080808" "
 _FF_STATUS_MASK    = bytes.fromhex("242425515E495A6060606F737F606060606181939EA0AE819788A5CEC1C60D0A")
 
 # Central current step for SPE box (mA per LSB)
-_CENTRAL_CURRENT_STEP_MA = 0.1
+_CENTRAL_CURRENT_STEP_MA = 12.0/31457
 
 
 # ==========================================================
@@ -309,6 +309,7 @@ class CalBoxConfig:
         if self.product != ProductCode.SPE:
             return
         code = int(mA / _CENTRAL_CURRENT_STEP_MA)
+        code = max(min(code, 31457), 0)
         for i in range(4):
             self.s[23 + i] = 0x40 | (0x1F & (code >> ((3 - i) * 5)))
 
@@ -369,8 +370,8 @@ class CalBoxConfig:
         else:
             # Old firmware without measured-voltage bytes
             self.s[0:3]   = raw[0:3]    # LED bytes
-            self.s[5:23]  = raw[3:21]
-            self.s[26:28] = raw[21:23]  # CRLF
+            self.s[5:24]  = raw[3:22]
+            self.s[26:28] = raw[22:24]  # CRLF
             self.set_voltage(self.measured_voltage())
         # Update cached release from the frame itself
         self.release = self.software_version()
@@ -689,8 +690,8 @@ class CalBoxHardware:
 
     def configure(self, led_mask: int, voltage_set: float, duration: int,
                   frequency_dividend: float, frequency_divider: int,
-                  width: int, lemo_out: bool, fiber1_out: bool,
-                  fiber2_out: bool, external: bool, enabled: bool,
+                  width: int, enabled: bool, lemo_out: bool, fiber1_out: bool,
+                  fiber2_out: bool, external: bool, 
                   central_current: float) -> CalBoxConfig:
         """Bulk configure: build a full frame from the supplied parameters."""
         with self._lock:
@@ -796,13 +797,12 @@ class CalibrationBoxServer:
         self._add_var("temperature",        20.0,    ua.VariantType.Float)
         self._add_var("humidity",           50.0,    ua.VariantType.Float)
         self._add_var("faults",             0,       ua.VariantType.Int16)
-        self._add_var("central_current",    0.0,     ua.VariantType.Float)
         self._add_var("light_pulse",        False,   ua.VariantType.Boolean)
         self._add_var("lemo_out",           True,    ua.VariantType.Boolean)
         self._add_var("fiber1_out",         True,    ua.VariantType.Boolean)
         self._add_var("fiber2_out",         True,    ua.VariantType.Boolean)
-        self._add_var("external",           False,   ua.VariantType.Boolean)
         self._add_var("lemo_in",            False,   ua.VariantType.Boolean)
+        self._add_var("central_current",    0.0,     ua.VariantType.Float)
         self._add_var("cls_state",          0,       ua.VariantType.Int32)
 
     # ----------------------------------------------------------
@@ -828,10 +828,10 @@ class CalibrationBoxServer:
           [ua.VariantType.Float, ua.VariantType.Int32])
 
         m("SetControl", self._m_set_control,
-          [ua.VariantType.Boolean,   # lemo
+          [ua.VariantType.Boolean,   # lemo_out (AKA trigger out)
            ua.VariantType.Boolean,   # fiber1
            ua.VariantType.Boolean,   # fiber2
-           ua.VariantType.Boolean,   # external
+           ua.VariantType.Boolean,   # external (AKA lemo_in)
            ua.VariantType.Boolean])  # enabled
 
         m("Configure", self._m_configure,
@@ -841,11 +841,11 @@ class CalibrationBoxServer:
            ua.VariantType.Float,     # frequency_dividend
            ua.VariantType.Int32,     # frequency_divider
            ua.VariantType.Int32,     # width
+           ua.VariantType.Boolean,   # enabled
            ua.VariantType.Boolean,   # lemo_out
            ua.VariantType.Boolean,   # fiber1_out
            ua.VariantType.Boolean,   # fiber2_out
-           ua.VariantType.Boolean,   # external
-           ua.VariantType.Boolean,   # enabled
+           ua.VariantType.Boolean,   # external (AKA lemo_in)
            ua.VariantType.Float])    # central_current
 
     # ----------------------------------------------------------
@@ -923,23 +923,23 @@ class CalibrationBoxServer:
         return self._dispatch(lambda: self.hardware.set_width(width))
 
     @unwrap_variants
-    def _m_set_control(self, parent, lemo, fiber1, fiber2, external, enabled):
+    def _m_set_control(self, parent, lemo_out, fiber1_out, fiber2_out, external, enabled):
         return self._dispatch(
             lambda: self.hardware.set_trigger_control(
-                lemo, fiber1, fiber2, external, enabled)
+                lemo_out, fiber1_out, fiber2_out, external, enabled)
         )
 
     @unwrap_variants
     def _m_configure(self, parent, led_mask, voltage_set, duration,
                      frequency_dividend, frequency_divider, width,
-                     lemo_out, fiber1_out, fiber2_out, external,
-                     enabled, central_current):
+                     enabled, lemo_out, fiber1_out, fiber2_out, external,
+                     central_current):
         return self._dispatch(
             lambda: self.hardware.configure(
                 led_mask, voltage_set, duration,
                 frequency_dividend, frequency_divider, width,
-                lemo_out, fiber1_out, fiber2_out, external,
-                enabled, central_current)
+                enabled, lemo_out, fiber1_out, fiber2_out, external,
+                central_current)
         )
 
     # ----------------------------------------------------------
@@ -1032,7 +1032,7 @@ def parse_args():
                    help="Root OPC UA object name")
     p.add_argument("--product-code",
                    type=lambda x: int(x, 0), default=0,
-                   help="Product code: 0xAA=SPE, 0x15=FF")
+                   help="Product code: 0xAA=SPE, 0xA5=FF")
     p.add_argument("--opcua-endpoint",
                    default="opc.tcp://0.0.0.0:4840/nectarcam/",
                    help="OPC UA server endpoint URL")
