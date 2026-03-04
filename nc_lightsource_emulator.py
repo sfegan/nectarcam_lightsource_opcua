@@ -74,7 +74,7 @@ class DeviceState:
 
         # Configurable parameters
         self.led_mask            = 8191
-        self.voltage_set         = 10.0
+        self.voltage_set         = 9.98
         self.duration            = 0
         self.frequency_dividend  = 10000.0
         self.frequency_divider   = 1
