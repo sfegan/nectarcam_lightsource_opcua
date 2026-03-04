@@ -15,7 +15,7 @@ The three components can be used together to test the server. In three terminal 
 
 ### Terminal 2: run the OPC UA server
 
-`# python3 nc_lightsource_opcua_server.py --opcua-endpoint=opc.tcp://localhost:4840/nectarcam/ --address=localhost --passwd HELLO --product-code 0xA5` --auto-reconnect
+`# python3 nc_lightsource_opcua_server.py --opcua-endpoint=opc.tcp://localhost:4840/nectarcam/ --address=localhost --passwd HELLO --product-code 0xA5 --auto-reconnect`
 
 ### Terminal 3: run the OPC UA test CLI
 
