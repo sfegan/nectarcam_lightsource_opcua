@@ -19,8 +19,7 @@ import functools
 import time
 
 from asyncua import Server, ua
-from asyncua.server.users import User, UserRole
-from asyncua.server.user_managers import UserManager
+from asyncua.server.user_managers import UserManager, User, UserRole
 
 
 def unwrap_variants(fn):
@@ -831,23 +830,23 @@ class CalibrationBoxServer:
 
     async def _create_monitoring(self):
         self.monitoring = await self.device.add_object(self.idx, "Monitoring")
-        await self._add_var("led_mask",           8191,    ua.VariantType.Int32)
-        await self._add_var("voltage_set",        10.0,    ua.VariantType.Float)
-        await self._add_var("voltage_actual",     10.0,    ua.VariantType.Float)
-        await self._add_var("duration",           0,       ua.VariantType.Int32)
-        await self._add_var("frequency_dividend", 10000.0, ua.VariantType.Float)
-        await self._add_var("frequency_divider",  1,       ua.VariantType.Int32)
-        await self._add_var("width",              1,       ua.VariantType.Int32)
-        await self._add_var("temperature",        20.0,    ua.VariantType.Float)
-        await self._add_var("humidity",           50.0,    ua.VariantType.Float)
-        await self._add_var("faults",             0,       ua.VariantType.Int16)
+        await self._add_var("led_mask",           8191,    ua.VariantType.Int64)
+        await self._add_var("voltage_set",        10.0,    ua.VariantType.Double)
+        await self._add_var("voltage_actual",     10.0,    ua.VariantType.Double)
+        await self._add_var("duration",           0,       ua.VariantType.Int64)
+        await self._add_var("frequency_dividend", 10000.0, ua.VariantType.Double)
+        await self._add_var("frequency_divider",  1,       ua.VariantType.Int64)
+        await self._add_var("width",              1,       ua.VariantType.Int64)
+        await self._add_var("temperature",        20.0,    ua.VariantType.Double)
+        await self._add_var("humidity",           50.0,    ua.VariantType.Double)
+        await self._add_var("faults",             0,       ua.VariantType.Int64)
         await self._add_var("light_pulse",        False,   ua.VariantType.Boolean)
         await self._add_var("lemo_out",           True,    ua.VariantType.Boolean)
         await self._add_var("fiber1_out",         True,    ua.VariantType.Boolean)
         await self._add_var("fiber2_out",         True,    ua.VariantType.Boolean)
         await self._add_var("lemo_in",            False,   ua.VariantType.Boolean)
-        await self._add_var("central_current",    0.0,     ua.VariantType.Float)
-        await self._add_var("cls_state",          0,       ua.VariantType.Int32)
+        await self._add_var("central_current",    0.0,     ua.VariantType.Double)
+        await self._add_var("cls_state",          0,       ua.VariantType.Int64)
 
     # ----------------------------------------------------------
     # OPC UA Methods
