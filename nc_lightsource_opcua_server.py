@@ -454,21 +454,22 @@ class CalBoxHardware:
 
     CONNECT_TIMEOUT = 5.0   # seconds
     IO_TIMEOUT      = 2.0   # seconds
-    CMD_SLEEP       = 0.5   # seconds before sending any command
 
     def __init__(self, address: str, port: int, password: str,
-                 product_code: int = 0):
-        self.address      = address
-        self.port         = port
+                 product_code: int = 0, min_cmd_interval: float = 0.0):
+        self.address          = address
+        self.port             = port
         # Append CRLF to the password as the device expects
-        self.password     = (password + "\r\n") if password else ""
-        self.product_code = product_code
-        self.release      = 6   # updated from first status reply
+        self.password         = (password + "\r\n") if password else ""
+        self.product_code     = product_code
+        self.release          = 6   # updated from first status reply
+        self.min_cmd_interval = min_cmd_interval  # 0 = no rate limiting
 
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._link_ok = False
         self._last_cfg: Optional[CalBoxConfig] = None
+        self._last_cmd_time: float = 0.0  # monotonic time of last send
 
     # ----------------------------------------------------------
     # Connection lifecycle
@@ -573,9 +574,20 @@ class CalBoxHardware:
         word = code | (self.product_code << 8) | (0x0A0D << 16)
         return struct.pack("<I", word)
 
+    def _rate_limit(self):
+        """Sleep only as long as needed to honour min_cmd_interval,
+        then record the send time."""
+        if self.min_cmd_interval > 0:
+            elapsed = time.monotonic() - self._last_cmd_time
+            wait = self.min_cmd_interval - elapsed
+            if wait > 0:
+                log.debug("Rate limiter: sleeping %.3f s", wait)
+                time.sleep(wait)
+        self._last_cmd_time = time.monotonic()
+
     def _exec_simple_cmd(self, code: int) -> Optional[CalBoxConfig]:
         """Send a 4-byte command and return a decoded CalBoxConfig (or None for RESET)."""
-        time.sleep(self.CMD_SLEEP)
+        self._rate_limit()
         frame = self._build_simple_cmd(code)
         log.debug("Sending cmd 0x%02X: %s", code, frame.hex().upper())
         self._send_all(frame)
@@ -623,7 +635,7 @@ class CalBoxHardware:
 
     def _send_configure(self, cfg: CalBoxConfig) -> CalBoxConfig:
         """Send a Configure frame and return the resulting status."""
-        time.sleep(self.CMD_SLEEP)
+        self._rate_limit()
         frame = cfg.to_cmd()
         log.debug("Sending Configure (%d B): %s",
                   len(frame), frame.hex().upper())
@@ -755,15 +767,16 @@ class CalibrationBoxServer:
 
     def __init__(
         self,
-        address:          str  = "10.11.4.69",
-        port:             int  = 50001,
-        password:         str  = "",
-        device_root_name: str  = "NectarCAM",
-        product_code:     int  = 0,
-        opcua_endpoint:   str  = "opc.tcp://0.0.0.0:4840/nectarcam/",
-        opcua_users:      dict = None,
+        address:          str   = "10.11.4.69",
+        port:             int   = 50001,
+        password:         str   = "",
+        device_root_name: str   = "NectarCAM",
+        product_code:     int   = 0,
+        opcua_endpoint:   str   = "opc.tcp://0.0.0.0:4840/nectarcam/",
+        opcua_users:      dict  = None,
         poll_interval:    float = 1.0,
         auto_reconnect:   bool  = False,
+        min_cmd_interval: float = 0.0,
     ):
         self.device_root_name = device_root_name
         self.opcua_users      = opcua_users or {}
@@ -787,7 +800,8 @@ class CalibrationBoxServer:
         self._create_monitoring()
         self._create_methods()
 
-        self.hardware = CalBoxHardware(address, port, password, product_code)
+        self.hardware = CalBoxHardware(address, port, password, product_code,
+                                       min_cmd_interval=min_cmd_interval)
         self.state    = DeviceState.Offline
         self._running = False
         self.poll_interval   = poll_interval
@@ -1116,6 +1130,8 @@ def parse_args():
                    help="Hardware polling interval in seconds (default: 1.0)")
     p.add_argument("--auto-reconnect", action="store_true",
                    help="Automatically attempt to reconnect when the device goes offline")
+    p.add_argument("--min-cmd-interval", type=float, default=0.0, metavar="SECONDS",
+                   help="Minimum time between commands sent to the device (default: 0, no limiting)")
     return p.parse_args()
 
 
@@ -1142,4 +1158,5 @@ if __name__ == "__main__":
         opcua_users      = opcua_users,
         poll_interval    = args.poll_interval,
         auto_reconnect   = args.auto_reconnect,
+        min_cmd_interval = args.min_cmd_interval,
     ).start()
