@@ -437,8 +437,9 @@ class CalBoxHardware:
     concurrent callers (OPC UA method callbacks + poll task).
     """
 
-    CONNECT_TIMEOUT = 5.0   # seconds
-    IO_TIMEOUT      = 2.0   # seconds
+    CONNECT_TIMEOUT  = 5.0   # seconds
+    IO_TIMEOUT       = 2.0   # seconds
+    POST_AUTH_DELAY  = 0.1   # seconds to wait after authentication before first command
 
     def __init__(self, address: str, port: int, password: str,
                  product_code: int = 0, min_cmd_interval: float = 0.0):
@@ -453,7 +454,7 @@ class CalBoxHardware:
         self._lock = asyncio.Lock()
         self._link_ok = False
         self._last_cfg: Optional[CalBoxConfig] = None
-        self._last_cmd_time: float = 0.0
+        self._earliest_cmd_time: float = 0.0
 
     # ----------------------------------------------------------
     # Blocking helpers – only called from the executor
@@ -485,7 +486,7 @@ class CalBoxHardware:
                 self._recv_exactly(2)
             log.info("Authenticated.")
             self._link_ok = True
-            time.sleep(1)
+            self._earliest_cmd_time = time.monotonic() + self.POST_AUTH_DELAY
             return True
         except OSError as exc:
             log.error("Authentication failed: %s", exc)
@@ -545,19 +546,19 @@ class CalBoxHardware:
         word = code | (self.product_code << 8) | (0x0A0D << 16)
         return struct.pack("<I", word)
 
-    def _rate_limit(self):
-        """Sleep only as long as needed to honour min_cmd_interval,
-        then record the send time.  Called from executor thread."""
-        if self.min_cmd_interval > 0:
-            elapsed = time.monotonic() - self._last_cmd_time
-            wait = self.min_cmd_interval - elapsed
-            if wait > 0:
-                log.debug("Rate limiter: sleeping %.3f s", wait)
-                time.sleep(wait)
-        self._last_cmd_time = time.monotonic()
+    async def _rate_limit(self):
+        """Wait until _earliest_cmd_time if it is in the future, then advance
+        it to prime the next command.  Must be awaited inside the lock before
+        every run_in_executor call that sends a command."""
+        wait = self._earliest_cmd_time - time.monotonic()
+        if wait > 0:
+            log.debug("Rate limiter: sleeping %.3f s", wait)
+            await asyncio.sleep(wait)
+            self._earliest_cmd_time += self.min_cmd_interval        # phase-locked
+        elif self.min_cmd_interval > 0:
+            self._earliest_cmd_time = time.monotonic() + self.min_cmd_interval  # phase reset
 
     def _exec_simple_cmd(self, code: int) -> Optional[CalBoxConfig]:
-        self._rate_limit()
         frame = self._build_simple_cmd(code)
         log.debug("Sending cmd 0x%02X: %s", code, frame.hex().upper())
         self._send_all(frame)
@@ -588,7 +589,6 @@ class CalBoxHardware:
         return self._send_configure(cfg)
 
     def _send_configure(self, cfg: CalBoxConfig) -> CalBoxConfig:
-        self._rate_limit()
         frame = cfg.to_cmd()
         log.debug("Sending Configure (%d B): %s", len(frame), frame.hex().upper())
         self._send_all(frame)
@@ -661,36 +661,43 @@ class CalBoxHardware:
 
     async def get_status(self) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_get_status)
 
     async def start(self) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_start)
 
     async def stop(self) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_stop)
 
     async def reboot(self):
         async with self._lock:
+            await self._rate_limit()
             await asyncio.get_running_loop().run_in_executor(
                 None, self._run_reboot)
 
     async def set_leds(self, mask: int) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_modify, lambda c: c.set_leds(mask))
 
     async def set_voltage(self, volts: float) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_modify, lambda c: c.set_voltage(volts))
 
     async def set_duration(self, duration: int) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_modify, lambda c: c.set_duration(duration))
 
@@ -699,22 +706,26 @@ class CalBoxHardware:
             c.set_dividend(dividend)
             c.set_divider(divider)
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_modify, _mod)
 
     async def set_central_current(self, mA: float) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_modify, lambda c: c.set_central_current(mA))
 
     async def set_width(self, width: int) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_modify, lambda c: c.set_width(width))
 
     async def set_trigger_control(self, lemo: bool, fiber1: bool, fiber2: bool,
                                   external: bool, enabled: bool) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_modify,
                 lambda c: c.set_control(lemo, fiber1, fiber2, external, enabled))
@@ -725,6 +736,7 @@ class CalBoxHardware:
                         fiber1_out: bool, fiber2_out: bool, external: bool,
                         central_current: float) -> CalBoxConfig:
         async with self._lock:
+            await self._rate_limit()
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._run_configure,
                 led_mask, voltage_set, duration,
@@ -800,6 +812,9 @@ class CalibrationBoxServer:
         logging.getLogger("asyncua.server.address_space").addFilter(
             _SuppressUaStatusCodeTracebacks()
         )
+        # Suppress harmless "parent node does not exist" messages during
+        # standard nodeset loading at startup
+        logging.getLogger("asyncua.server.address_space").setLevel(logging.WARNING)
 
     # ----------------------------------------------------------
     # Async initialisation
