@@ -143,9 +143,21 @@ class CalBoxConfig:
         return (value >> pos) & 1
 
     # ----------------------------------------------------------
+    # Range validation helper
+    # ----------------------------------------------------------
+    @staticmethod
+    def _clamp(name: str, value, lo, hi):
+        if value < lo or value > hi:
+            log.warning("CalBoxConfig: %s value %s out of range [%s, %s], clamping",
+                        name, value, lo, hi)
+            return max(lo, min(hi, value))
+        return value
+
+    # ----------------------------------------------------------
     # LED mask  (13 LEDs packed into 3 status bytes)
     # ----------------------------------------------------------
     def set_leds(self, mask: int):
+        mask = self._clamp("led_mask", mask, 0, 0x1FFF)
         b = self._bit
         if self.product == ProductCode.FF:
             self.s[0] = 0x20|(b(mask,6)<<4)|(b(mask,2)<<3)|(b(mask,4)<<2)|(b(mask,7)<<1)|b(mask,12)
@@ -194,10 +206,12 @@ class CalBoxConfig:
     # ----------------------------------------------------------
     @staticmethod
     def _voltage_to_code(volts: float) -> int:
-        volts = min(16.5, max(7.9, volts))
         return int((volts - 7.9) * 950 / 8.44)
 
     def set_voltage(self, volts: float):
+        # C++: setVoltageToSetCode clamps to [7.9, 16.5] V
+        # ICD §3.6: code range 20-235 gives [8.07, 9.98] V (clearly wrong!)
+        volts = self._clamp("voltage", volts, 7.9, 16.5)
         code = self._voltage_to_code(volts)
         self.s[3] = 0x40 | ((code >> 5) & 0x1F)
         self.s[4] = 0x40 | (code & 0x1F)
@@ -221,6 +235,7 @@ class CalBoxConfig:
     # Duration  -  10-bit in s[7:9]
     # ----------------------------------------------------------
     def set_duration(self, duration: int):
+        duration = self._clamp("duration", duration, 0, 1023)
         self.s[7] = 0x60 | ((duration >> 5) & 0x1F)
         self.s[8] = 0x60 | (duration & 0x1F)
 
@@ -230,7 +245,16 @@ class CalBoxConfig:
     # ----------------------------------------------------------
     # Frequency dividend  -  20-bit in s[9:13]
     # ----------------------------------------------------------
+    # ICD §3.6: code range 1500–65530, giving 244.16–10659.56 Hz (divider=1)
+    # freq = 1e10 / 625 / (code + 1)  →  higher code = lower frequency
+    _DIVIDEND_MAX_HZ = 1e10 / 625 / (1500 + 1)   # ≈ 10 659.56 Hz  (code = 1500)
+    _DIVIDEND_MIN_HZ = 1e10 / 625 / (65530 + 1)  # ≈    244.16 Hz  (code = 65530)
+
     def set_dividend(self, dividend: float):
+        if dividend <= 0:
+            raise ValueError(f"dividend must be > 0, got {dividend}")
+        dividend = self._clamp("dividend", dividend,
+                               self._DIVIDEND_MIN_HZ, self._DIVIDEND_MAX_HZ)
         code = int(math.floor(1e10 / dividend / 625 - 1))
         self.s[9]  = 0x60 | (0x1F & (code >> 15))
         self.s[10] = 0x60 | (0x1F & (code >> 10))
@@ -248,6 +272,8 @@ class CalBoxConfig:
     # Frequency divider  -  15-bit in s[13:16]
     # ----------------------------------------------------------
     def set_divider(self, divider: int):
+        # ICD §3.6: range 1–3000 (allows frequencies down to ~0.1 Hz)
+        divider = self._clamp("divider", divider, 1, 3000)
         code = divider - 1
         self.s[13] = 0x60 | (0x1F & (code >> 10))
         self.s[14] = 0x60 | (0x1F & (code >>  5))
@@ -263,6 +289,8 @@ class CalBoxConfig:
     # Pulse width  -  10-bit in s[16:18]
     # ----------------------------------------------------------
     def set_width(self, width: int):
+        # ICD §3.6: range 1–1000 (62.5 ns to 62500 ns)
+        width = self._clamp("width", width, 1, 1000)
         self.s[16] = 0x60 | (0x1F & (width >> 5))
         self.s[17] = 0x60 | (0x1F &  width)
 
@@ -322,8 +350,8 @@ class CalBoxConfig:
     def set_central_current(self, mA: float):
         if self.product != ProductCode.SPE:
             return
+        mA = self._clamp("central_current", mA, 0.0, 31457 * _CENTRAL_CURRENT_STEP_MA)
         code = int(mA / _CENTRAL_CURRENT_STEP_MA)
-        code = max(min(code, 31457), 0)
         for i in range(4):
             self.s[23 + i] = 0x40 | (0x1F & (code >> ((3 - i) * 5)))
 
@@ -455,6 +483,7 @@ class CalBoxHardware:
         self._link_ok = False
         self._last_cfg: Optional[CalBoxConfig] = None
         self._earliest_cmd_time: float = 0.0
+        self._connect_log_level: int = logging.ERROR  # demoted to INFO during auto-reconnect
 
     # ----------------------------------------------------------
     # Blocking helpers – only called from the executor
@@ -471,7 +500,7 @@ class CalBoxHardware:
             log.info("Connected.")
             return True
         except OSError as exc:
-            log.error("Connection failed: %s", exc)
+            log.log(self._connect_log_level, "Connection failed: %s", exc)
             self._sock = None
             return False
 
@@ -489,7 +518,7 @@ class CalBoxHardware:
             self._earliest_cmd_time = time.monotonic() + self.POST_AUTH_DELAY
             return True
         except OSError as exc:
-            log.error("Authentication failed: %s", exc)
+            log.log(self._connect_log_level, "Authentication failed: %s", exc)
             self._link_ok = False
             return False
 
@@ -579,6 +608,17 @@ class CalBoxHardware:
         self.release = CalBoxConfig.software_version_from_buf(raw_with_crlf)
         cfg = CalBoxConfig(self.product_code, self.release)
         cfg.from_status(raw_with_crlf)
+        reported_code = cfg.product_code()
+        if reported_code != self.product_code:
+            reported_name = ProductCode(reported_code).name if reported_code in ProductCode._value2member_map_ else "unknown"
+            configured_name = ProductCode(self.product_code).name
+            log.warning(
+                "Product code mismatch: configured 0x%02X (%s) but device "
+                "reports 0x%02X (%s) — verify --product is correct "
+                "(SPE=0xAA, FF=0xA5)",
+                self.product_code, configured_name,
+                reported_code, reported_name,
+            )
         self._last_cfg = cfg
         log.info("Status: %s", cfg)
         return cfg
@@ -841,6 +881,7 @@ class CalibrationBoxServer:
         var = await container.add_variable(
             self.idx, name + "_v", ua.Variant(default, vtype)
         )
+        await var.set_read_only()
         self.vars[name] = var
 
     async def _create_monitoring(self):
@@ -1062,12 +1103,16 @@ class CalibrationBoxServer:
                 elif self.auto_reconnect:
                     log.info("Auto-reconnect: attempting to reconnect ...")
                     await self.hardware.close()
+                    self.hardware._connect_log_level = logging.INFO
                     if (await self.hardware.connect()
                             and await self.hardware.authenticate()):
+                        self.hardware._connect_log_level = logging.ERROR
                         log.info("Auto-reconnect succeeded.")
                         self._schedule_status_refresh()
                     else:
-                        log.warning("Auto-reconnect failed, will retry.")
+                        log.info("Auto-reconnect failed, will retry.")
+                else:
+                    log.debug("Device still offline: %s", exc)
             await asyncio.sleep(self.poll_interval)
 
     # ----------------------------------------------------------
@@ -1129,9 +1174,9 @@ def parse_args():
                    help="CalBox password (omit if none)")
     p.add_argument("--device-root-name",  default="NectarCAM",
                    help="Root OPC UA object name")
-    p.add_argument("--product-code",
-                   type=lambda x: int(x, 0), default=0,
-                   help="Product code: 0xAA=SPE, 0xA5=FF")
+    p.add_argument("--product", required=True,
+                   choices=["SPE", "FF"],
+                   help="Device type: SPE (Single Photon) or FF (Flat Field)")
     p.add_argument("--opcua-endpoint",
                    default="opc.tcp://0.0.0.0:4840/nectarcam/",
                    help="OPC UA server endpoint URL")
@@ -1166,7 +1211,7 @@ async def main():
         port             = args.port,
         password         = args.passwd,
         device_root_name = args.device_root_name,
-        product_code     = args.product_code,
+        product_code     = ProductCode[args.product],
         opcua_endpoint   = args.opcua_endpoint,
         opcua_users      = opcua_users,
         poll_interval    = args.poll_interval,
