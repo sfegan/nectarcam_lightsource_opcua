@@ -316,6 +316,7 @@ class _BoxDialect(ABC):
     decode(raw)             -> chomps a memoryview of the status bytes -> BoxState
     """
 
+    NAME:         ClassVar[str]
     PRODUCT_CODE: ClassVar[int]
     CMD_SIZE:     ClassVar[int]    # total bytes in a ConfigSet command
     STATUS_SIZE:  ClassVar[int]    # total bytes in a status response (incl. CR LF)
@@ -377,6 +378,7 @@ class FFBoxDialect(_BoxDialect):
       C19     LF (0x0A)
     """
 
+    NAME         = "FF"
     PRODUCT_CODE = 0xA5
     CMD_SIZE     = 20
     STATUS_SIZE  = 32
@@ -486,6 +488,7 @@ class SPEBoxDialect(_BoxDialect):
       C23     LF (0x0A)
     """
 
+    NAME         = "SPE"
     PRODUCT_CODE = 0xAA
     CMD_SIZE     = 24
     STATUS_SIZE  = 33
@@ -612,7 +615,6 @@ class CalBoxConnection:
         self._lock               = asyncio.Lock()
         self._link_ok            = False
         self._earliest_cmd_time  = 0.0
-        self._connect_log_level: int = logging.ERROR   # demoted during reconnect
 
     @property
     def is_connected(self) -> bool:
@@ -623,7 +625,6 @@ class CalBoxConnection:
     # ----------------------------------------------------------------
 
     async def connect(self) -> bool:
-        log.info("Connecting to %s:%d ...", self.host, self.port)
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port),
@@ -632,10 +633,9 @@ class CalBoxConnection:
             sock = self._writer.transport.get_extra_info("socket")
             if sock:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            log.info("TCP connection established.")
             return True
         except (OSError, asyncio.TimeoutError) as exc:
-            log.log(self._connect_log_level, "Connection failed: %s", exc)
+            log.debug("Connection to %s:%d failed: %s", self.host, self.port, exc)
             self._reader = self._writer = None
             return False
 
@@ -649,12 +649,11 @@ class CalBoxConnection:
                 self._writer.write((self.password + "\r\n").encode())
                 await self._writer.drain()
                 await self._recv_exactly(2)   # echo / ACK
-            log.info("Authenticated.")
             self._link_ok = True
             self._earliest_cmd_time = time.monotonic() + self.POST_AUTH_DELAY
             return True
         except (OSError, asyncio.TimeoutError) as exc:
-            log.log(self._connect_log_level, "Authentication failed: %s", exc)
+            log.debug("Authentication failed: %s", exc)
             self._link_ok = False
             return False
 
@@ -667,7 +666,6 @@ class CalBoxConnection:
             except OSError:
                 pass
             self._reader = self._writer = None
-        log.info("Connection closed.")
 
     # ----------------------------------------------------------------
     # Public command API
@@ -725,14 +723,8 @@ class CalBoxConnection:
     # ----------------------------------------------------------------
 
     async def _ensure_connected(self):
-        if self.is_connected:
-            return
-        if not self.auto_reconnect:
+        if not self.is_connected:
             raise OSError("Not connected")
-        log.info("Re-connecting ...")
-        await self.close()
-        if not (await self.connect() and await self.authenticate()):
-            raise OSError("Auto-reconnect failed")
 
     async def _rate_limit(self):
         wait = self._earliest_cmd_time - time.monotonic()
@@ -779,9 +771,10 @@ class CalBoxConnection:
                 "0x%02X -- verify the --product flag",
                 self.dialect.PRODUCT_CODE, state.product_code,
             )
-        log.info("Status: leds=0x%04x V=%.2f T=%.1f faults=0x%02x enabled=%s",
-                 state.leds, state.voltage_set, state.temperature,
-                 state.faults, state.light_pulse)
+        log.info("%s status: enabled=%s leds=0x%04x V=%.2f T=%.1f faults=0x%02x",
+                 self.dialect.NAME,
+                 state.light_pulse, state.leds, state.voltage_set, 
+                 state.temperature, state.faults)
         return state
 
 
@@ -1014,9 +1007,12 @@ class CalibrationBoxServer:
     @_unwrap_variants
     async def _m_reconnect(self, parent):
         await self.connection.close()
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
+        log.info("Attempting reconnection to %s device %s:%d ...",
+                 self.connection.dialect.NAME, self.connection.host, self.connection.port)
         if await self.connection.connect() and await self.connection.authenticate():
-            log.info("Reconnect succeeded.")
+            log.info("Reconnected to %s device %s:%d.",
+                     self.connection.dialect.NAME, self.connection.host, self.connection.port)
             self.device_state = DeviceState.Disabled
             await self._set_var("cls_state", int(self.device_state))
             await self._apply_state(await self.connection.get_status())
@@ -1112,15 +1108,15 @@ class CalibrationBoxServer:
                     await self._set_var("cls_state", int(self.device_state))
                     await self.connection.close()
                 elif self.auto_reconnect:
-                    log.info("Auto-reconnect: attempting ...")
+                    log.info("Attempting reconnection to %s device %s:%d ...",
+                              self.connection.dialect.NAME, self.connection.host, self.connection.port)
                     await self.connection.close()
-                    self.connection._connect_log_level = logging.INFO
                     if (await self.connection.connect()
                             and await self.connection.authenticate()):
-                        self.connection._connect_log_level = logging.ERROR
-                        log.info("Auto-reconnect succeeded.")
+                        log.info("Reconnected to %s device %s:%d.",
+                                 self.connection.dialect.NAME, self.connection.host, self.connection.port)
                     else:
-                        log.info("Auto-reconnect failed, will retry.")
+                        log.debug("Reconnect failed, will retry.")
                 else:
                     log.debug("Device offline: %s", exc)
 
@@ -1142,6 +1138,7 @@ class CalibrationBoxServer:
     async def start(self):
         await self._init_server()
 
+        log.info("Connecting to %s:%d ...", self.connection.host, self.connection.port)
         connected = (await self.connection.connect()
                      and await self.connection.authenticate())
         if connected:
