@@ -57,6 +57,10 @@ MINIMAL_STATUS_SIZE  = 24
 _CENTRAL_CURRENT_STEP_MA = 12.0/31457
 
 
+class _RebootRequested(Exception):
+    """Raised by the RESET handler to force-close the client connection."""
+
+
 # ==========================================================
 # Device state
 # ==========================================================
@@ -96,6 +100,25 @@ class DeviceState:
         # Informational
         self.product_id          = 1
         self.connected           = False
+
+    # ----------------------------------------------------------
+    def reset(self):
+        """Restore all configurable parameters to their power-on defaults."""
+        with self._lock:
+            self.led_mask            = 8191
+            self.voltage_set         = 9.98
+            self.duration            = 0
+            self.frequency_dividend  = 10000.0
+            self.frequency_divider   = 1
+            self.width               = 1
+            self.lemo_out            = True
+            self.fiber1_out          = True
+            self.fiber2_out          = True
+            self.external            = False
+            self.enabled             = False
+            self.central_current     = 0.0
+            self.connected           = False
+        log.info("Device state reset to defaults.")
 
     # ----------------------------------------------------------
     def update(self, **kwargs):
@@ -460,11 +483,13 @@ class TcpEmulator:
                 self.state.update(connected=True)
                 try:
                     self._handle_connection(conn)
+                except _RebootRequested:
+                    log.info("Reboot: closing client connection.")
                 except Exception as exc:
                     log.error("Connection error: %s", exc)
                 finally:
                     conn.close()
-                    self.state.update(connected=False, enabled=False)
+                    self.state.update(connected=False)
                     log.info("Client disconnected.")
             except OSError:
                 break   # server socket closed
@@ -567,9 +592,9 @@ class TcpEmulator:
             self._send_status(conn)
 
         elif cmd == Cmd.RESET:
-            log.info("CMD: Reset (rebooting, no reply)")
-            self.state.update(enabled=False)
-            # No reply for RESET
+            log.info("CMD: Reset — resetting state and dropping client connection")
+            self.state.reset()
+            raise _RebootRequested("Reboot requested by client")
 
     def _handle_configure(self, conn: socket.socket, frame: bytes):
         log.info("CMD: Configure")
