@@ -408,14 +408,14 @@ class FFBoxDialect(_BoxDialect):
 
     def encode_configure(self, state: BoxState) -> bytes:
         return (
-            self._enc_leds(state.leds)                  # 3 bytes  C0-C2
+            self._enc_leds(state.leds)                   # 3 bytes  C0-C2
             + _enc_voltage_set(state.voltage_set)        # 2 bytes  C3-C4
             + _enc_duration(state.duration)              # 2 bytes  C5-C6
             + _enc_frequency(state.frequency_dividend)   # 4 bytes  C7-C10
             + _enc_divider(state.frequency_divider)      # 3 bytes  C11-C13
             + _enc_width(state.width)                    # 2 bytes  C14-C15
             + _enc_control(state)                        # 1 byte   C16
-            + bytes([self.PRODUCT_CODE, 0x0D, 0x0A])    # 3 bytes  C17-C19
+            + bytes([self.PRODUCT_CODE, 0x0D, 0x0A])     # 3 bytes  C17-C19
         )
 
     def decode(self, raw: bytes) -> BoxState:
@@ -434,7 +434,7 @@ class FFBoxDialect(_BoxDialect):
          s.fiber1_out, s.fiber2_out, s.lemo_in), mv = _dec_control(mv)  # C22
         s.humidity,           mv = _dec_humidity(mv)     # C23-C25
         (s.product_code, s.serial_number,
-         s.software_release), mv = _dec_metadata(mv)    # C26-C29
+         s.software_release), mv = _dec_metadata(mv)     # C26-C29
         if bytes(mv) != b"\r\n":
             raise ValueError(f"FF frame: expected CR LF trailer, got {bytes(mv).hex().upper()!r}")
         return s
