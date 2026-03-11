@@ -408,33 +408,33 @@ class FFBoxDialect(_BoxDialect):
 
     def encode_configure(self, state: BoxState) -> bytes:
         return (
-            self._enc_led_mask(state.led_mask)               # 3 bytes  C0-C2
-            + _enc_voltage_set(state.voltage_set)        # 2 bytes  C3-C4
-            + _enc_duration(state.duration)              # 2 bytes  C5-C6
-            + _enc_frequency(state.frequency_dividend)   # 4 bytes  C7-C10
-            + _enc_divider(state.frequency_divider)      # 3 bytes  C11-C13
-            + _enc_width(state.width)                    # 2 bytes  C14-C15
-            + _enc_control(state)                        # 1 byte   C16
-            + bytes([self.PRODUCT_CODE, 0x0D, 0x0A])     # 3 bytes  C17-C19
+            self._enc_led_mask(state.led_mask)             # 3 bytes  C0-C2
+            + _enc_voltage_set(state.voltage_set)          # 2 bytes  C3-C4
+            + _enc_duration(state.duration)                # 2 bytes  C5-C6
+            + _enc_frequency(state.frequency_dividend)     # 4 bytes  C7-C10
+            + _enc_divider(state.frequency_divider)        # 3 bytes  C11-C13
+            + _enc_width(state.width)                      # 2 bytes  C14-C15
+            + _enc_control(state)                          # 1 byte   C16
+            + bytes([self.PRODUCT_CODE, 0x0D, 0x0A])       # 3 bytes  C17-C19
         )
 
     def decode(self, raw: bytes) -> BoxState:
         s = BoxState()
         mv = memoryview(raw)
-        s.led_mask,           mv = self._dec_led_mask(mv)    # C0-C2
-        s.voltage_set,        mv = _dec_voltage_set(mv)  # C3-C4
+        s.led_mask,           mv = self._dec_led_mask(mv)  # C0-C2
+        s.voltage_set,        mv = _dec_voltage_set(mv)    # C3-C4
         s.voltage_actual,     mv = _dec_voltage_actual(mv) # C5-C6
-        s.duration,           mv = _dec_duration(mv)     # C7-C8
-        s.frequency_dividend, mv = _dec_frequency(mv)    # C9-C12
-        s.frequency_divider,  mv = _dec_divider(mv)      # C13-C15
-        s.width,              mv = _dec_width(mv)        # C16-C17
-        s.temperature,        mv = _dec_temperature(mv)  # C18-C20
-        s.faults,             mv = _dec_faults(mv)       # C21
+        s.duration,           mv = _dec_duration(mv)       # C7-C8
+        s.frequency_dividend, mv = _dec_frequency(mv)      # C9-C12
+        s.frequency_divider,  mv = _dec_divider(mv)        # C13-C15
+        s.width,              mv = _dec_width(mv)          # C16-C17
+        s.temperature,        mv = _dec_temperature(mv)    # C18-C20
+        s.faults,             mv = _dec_faults(mv)         # C21
         (s.light_pulse, s.lemo_out,
          s.fiber1_out, s.fiber2_out, s.lemo_in), mv = _dec_control(mv)  # C22
-        s.humidity,           mv = _dec_humidity(mv)     # C23-C25
+        s.humidity,           mv = _dec_humidity(mv)       # C23-C25
         (s.product_code, s.serial_number,
-         s.software_release), mv = _dec_metadata(mv)     # C26-C29
+         s.software_release), mv = _dec_metadata(mv)       # C26-C29
         if bytes(mv) != b"\r\n":
             raise ValueError(f"FF frame: expected CR LF trailer, got {bytes(mv).hex().upper()!r}")
         return s
@@ -518,34 +518,34 @@ class SPEBoxDialect(_BoxDialect):
 
     def encode_configure(self, state: BoxState) -> bytes:
         return (
-            self._enc_led_mask(state.led_mask)               # 3 bytes  C0-C2
-            + _enc_voltage_set(state.voltage_set)         # 2 bytes  C3-C4
-            + _enc_duration(state.duration)               # 2 bytes  C5-C6
-            + _enc_frequency(state.frequency_dividend)    # 4 bytes  C7-C10
-            + _enc_divider(state.frequency_divider)       # 3 bytes  C11-C13
-            + _enc_width(state.width)                     # 2 bytes  C14-C15
-            + _enc_control(state)                         # 1 byte   C16
-            + _enc_central_current(state.central_current) # 4 bytes  C17-C20
-            + bytes([self.PRODUCT_CODE, 0x0D, 0x0A])     # 3 bytes  C21-C23
+            self._enc_led_mask(state.led_mask)             # 3 bytes  C0-C2
+            + _enc_voltage_set(state.voltage_set)          # 2 bytes  C3-C4
+            + _enc_duration(state.duration)                # 2 bytes  C5-C6
+            + _enc_frequency(state.frequency_dividend)     # 4 bytes  C7-C10
+            + _enc_divider(state.frequency_divider)        # 3 bytes  C11-C13
+            + _enc_width(state.width)                      # 2 bytes  C14-C15
+            + _enc_control(state)                          # 1 byte   C16
+            + _enc_central_current(state.central_current)  # 4 bytes  C17-C20
+            + bytes([self.PRODUCT_CODE, 0x0D, 0x0A])       # 3 bytes  C21-C23
         )
 
     def decode(self, raw: bytes) -> BoxState:
         s = BoxState()
         mv = memoryview(raw)
-        s.led_mask,           mv = self._dec_led_mask(mv)    # C0-C2
-        s.voltage_set,        mv = _dec_voltage_set(mv)  # C3-C4
+        s.led_mask,           mv = self._dec_led_mask(mv)  # C0-C2
+        s.voltage_set,        mv = _dec_voltage_set(mv)    # C3-C4
         s.voltage_actual,     mv = _dec_voltage_actual(mv) # C5-C6
-        s.duration,           mv = _dec_duration(mv)     # C7-C8
-        s.frequency_dividend, mv = _dec_frequency(mv)    # C9-C12
-        s.frequency_divider,  mv = _dec_divider(mv)      # C13-C15
-        s.width,              mv = _dec_width(mv)        # C16-C17
-        s.temperature,        mv = _dec_temperature(mv)  # C18-C20
-        s.faults,             mv = _dec_faults(mv)       # C21
+        s.duration,           mv = _dec_duration(mv)       # C7-C8
+        s.frequency_dividend, mv = _dec_frequency(mv)      # C9-C12
+        s.frequency_divider,  mv = _dec_divider(mv)        # C13-C15
+        s.width,              mv = _dec_width(mv)          # C16-C17
+        s.temperature,        mv = _dec_temperature(mv)    # C18-C20
+        s.faults,             mv = _dec_faults(mv)         # C21
         (s.light_pulse, s.lemo_out,
          s.fiber1_out, s.fiber2_out, s.lemo_in), mv = _dec_control(mv)  # C22
         s.central_current,    mv = _dec_central_current(mv) # C23-C26
         (s.product_code, s.serial_number,
-         s.software_release), mv = _dec_metadata(mv)    # C27-C30
+         s.software_release), mv = _dec_metadata(mv)       # C27-C30
         if bytes(mv) != b"\r\n":
             raise ValueError(f"SPE frame: expected CR LF trailer, got {bytes(mv).hex().upper()!r}")
         return s
