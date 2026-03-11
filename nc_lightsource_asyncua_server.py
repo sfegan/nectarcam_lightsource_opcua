@@ -93,7 +93,7 @@ class BoxState:
     """
 
     # LED on/off bitmap – bit N corresponds to LED N+1 (0-based, 13 LEDs)
-    leds: int = 0x1FFF
+    led_mask: int = 0x1FFF
 
     # LED supply voltage to set (V), range [7.9, 16.5]
     voltage_set: float = 10.0
@@ -383,14 +383,14 @@ class FFBoxDialect(_BoxDialect):
     CMD_SIZE     = 20
     STATUS_SIZE  = 32
 
-    def _enc_leds(self, leds: int) -> bytes:
+    def _enc_led_mask(self, mask: int) -> bytes:
         return bytes([
-            _TAG_LED | (_b(leds,6)<<4) | (_b(leds,2)<<3) | (_b(leds,4)<<2) | (_b(leds,7)<<1) | _b(leds,12),
-            _TAG_LED | (_b(leds,10)<<4) | (_b(leds,5)<<3) | (_b(leds,3)<<2) | (_b(leds,0)<<1) | _b(leds,1),
-            _TAG_LED | (_b(leds,9)<<2) | (_b(leds,11)<<1) | _b(leds,8),
+            _TAG_LED | (_b(mask,6)<<4) | (_b(mask,2)<<3) | (_b(mask,4)<<2) | (_b(mask,7)<<1) | _b(mask,12),
+            _TAG_LED | (_b(mask,10)<<4) | (_b(mask,5)<<3) | (_b(mask,3)<<2) | (_b(mask,0)<<1) | _b(mask,1),
+            _TAG_LED | (_b(mask,9)<<2) | (_b(mask,11)<<1) | _b(mask,8),
         ])
 
-    def _dec_leds(self, mv: memoryview) -> tuple:
+    def _dec_led_mask(self, mv: memoryview) -> tuple:
         mask  = _b(mv[0], 0) << 12
         mask |= _b(mv[2], 1) << 11
         mask |= _b(mv[1], 4) << 10
@@ -408,7 +408,7 @@ class FFBoxDialect(_BoxDialect):
 
     def encode_configure(self, state: BoxState) -> bytes:
         return (
-            self._enc_leds(state.leds)                   # 3 bytes  C0-C2
+            self._enc_led_mask(state.led_mask)               # 3 bytes  C0-C2
             + _enc_voltage_set(state.voltage_set)        # 2 bytes  C3-C4
             + _enc_duration(state.duration)              # 2 bytes  C5-C6
             + _enc_frequency(state.frequency_dividend)   # 4 bytes  C7-C10
@@ -421,7 +421,7 @@ class FFBoxDialect(_BoxDialect):
     def decode(self, raw: bytes) -> BoxState:
         s = BoxState()
         mv = memoryview(raw)
-        s.leds,               mv = self._dec_leds(mv)    # C0-C2
+        s.led_mask,           mv = self._dec_led_mask(mv)    # C0-C2
         s.voltage_set,        mv = _dec_voltage_set(mv)  # C3-C4
         s.voltage_actual,     mv = _dec_voltage_actual(mv) # C5-C6
         s.duration,           mv = _dec_duration(mv)     # C7-C8
@@ -493,14 +493,14 @@ class SPEBoxDialect(_BoxDialect):
     CMD_SIZE     = 24
     STATUS_SIZE  = 33
 
-    def _enc_leds(self, leds: int) -> bytes:
+    def _enc_led_mask(self, mask: int) -> bytes:
         return bytes([
-            _TAG_LED | (_b(leds,9)<<4) | (_b(leds,8)<<3) | (_b(leds,12)<<2) | (_b(leds,11)<<1) | _b(leds,10),
-            _TAG_LED | (_b(leds,4)<<4) | (_b(leds,3)<<3) | (_b(leds,7)<<2)  | (_b(leds,6)<<1)  | _b(leds,5),
-            _TAG_LED | (_b(leds,2)<<2) | (_b(leds,1)<<1) | _b(leds,0),
+            _TAG_LED | (_b(mask,9)<<4) | (_b(mask,8)<<3) | (_b(mask,12)<<2) | (_b(mask,11)<<1) | _b(mask,10),
+            _TAG_LED | (_b(mask,4)<<4) | (_b(mask,3)<<3) | (_b(mask,7)<<2)  | (_b(mask,6)<<1)  | _b(mask,5),
+            _TAG_LED | (_b(mask,2)<<2) | (_b(mask,1)<<1) | _b(mask,0),
         ])
 
-    def _dec_leds(self, mv: memoryview) -> tuple:
+    def _dec_led_mask(self, mv: memoryview) -> tuple:
         mask  = _b(mv[0], 2) << 12
         mask |= _b(mv[0], 1) << 11
         mask |= _b(mv[0], 0) << 10
@@ -518,7 +518,7 @@ class SPEBoxDialect(_BoxDialect):
 
     def encode_configure(self, state: BoxState) -> bytes:
         return (
-            self._enc_leds(state.leds)                   # 3 bytes  C0-C2
+            self._enc_led_mask(state.led_mask)               # 3 bytes  C0-C2
             + _enc_voltage_set(state.voltage_set)         # 2 bytes  C3-C4
             + _enc_duration(state.duration)               # 2 bytes  C5-C6
             + _enc_frequency(state.frequency_dividend)    # 4 bytes  C7-C10
@@ -532,7 +532,7 @@ class SPEBoxDialect(_BoxDialect):
     def decode(self, raw: bytes) -> BoxState:
         s = BoxState()
         mv = memoryview(raw)
-        s.leds,               mv = self._dec_leds(mv)    # C0-C2
+        s.led_mask,           mv = self._dec_led_mask(mv)    # C0-C2
         s.voltage_set,        mv = _dec_voltage_set(mv)  # C3-C4
         s.voltage_actual,     mv = _dec_voltage_actual(mv) # C5-C6
         s.duration,           mv = _dec_duration(mv)     # C7-C8
@@ -773,7 +773,7 @@ class CalBoxConnection:
             )
         log.info("%s status: enabled=%s leds=0x%04x V=%.2f T=%.1f faults=0x%02x",
                  self.dialect.NAME,
-                 state.light_pulse, state.leds, state.voltage_set, 
+                 state.light_pulse, state.led_mask, state.voltage_set, 
                  state.temperature, state.faults)
         return state
 
@@ -1028,18 +1028,18 @@ class CalibrationBoxServer:
 
     @_unwrap_variants
     async def _m_set_leds(self, parent, mask: int):
-        return await self._dispatch(
-            self.connection.modify(lambda s: setattr(s, "leds", mask)))
+        def _mod(s: BoxState): s.led_mask = mask
+        return await self._dispatch(self.connection.modify(_mod))
 
     @_unwrap_variants
     async def _m_set_voltage(self, parent, volts: float):
-        return await self._dispatch(
-            self.connection.modify(lambda s: setattr(s, "voltage_set", volts)))
+        def _mod(s: BoxState): s.voltage_set = volts
+        return await self._dispatch(self.connection.modify(_mod))
 
     @_unwrap_variants
     async def _m_set_duration(self, parent, duration: int):
-        return await self._dispatch(
-            self.connection.modify(lambda s: setattr(s, "duration", duration)))
+        def _mod(s: BoxState): s.duration = duration
+        return await self._dispatch(self.connection.modify(_mod))
 
     @_unwrap_variants
     async def _m_set_frequency(self, parent, dividend: float, divider: int):
@@ -1050,13 +1050,13 @@ class CalibrationBoxServer:
 
     @_unwrap_variants
     async def _m_set_current(self, parent, mA: float):
-        return await self._dispatch(
-            self.connection.modify(lambda s: setattr(s, "central_current", mA)))
+        def _mod(s: BoxState): s.central_current = mA
+        return await self._dispatch(self.connection.modify(_mod))
 
     @_unwrap_variants
     async def _m_set_width(self, parent, width: int):
-        return await self._dispatch(
-            self.connection.modify(lambda s: setattr(s, "width", width)))
+        def _mod(s: BoxState): s.width = width
+        return await self._dispatch(self.connection.modify(_mod))
 
     @_unwrap_variants
     async def _m_set_control(self, parent,
@@ -1076,7 +1076,7 @@ class CalibrationBoxServer:
                             fiber1_out: bool, fiber2_out: bool,
                             lemo_in: bool, central_current: float):
         state = BoxState(
-            leds=led_mask, voltage_set=voltage_set, duration=duration,
+            led_mask=led_mask, voltage_set=voltage_set, duration=duration,
             frequency_dividend=frequency_dividend, frequency_divider=frequency_divider,
             width=width, light_pulse=light_pulse, lemo_out=lemo_out,
             fiber1_out=fiber1_out, fiber2_out=fiber2_out,
