@@ -1,15 +1,23 @@
 """
 nc_lightsource_asyncua_server.py
-NectarCAM Calibration Box OPC UA Server
+NectarCAM Calibration Light Source OPC UA Server
 
 Three-layer architecture
 ========================
 
-1. Dialect layer  (FFBoxDialect / SPEBoxDialect)
+1. Dialect layer  (FFBoxDialect / AIVFFBoxDialect / SPEBoxDialect)
    Pure data classes – no networking, no asyncio.  Each dialect knows only
    how to convert between a BoxState and the raw bytes that travel over the
    wire for its device variant.  Frames are built by concatenating bytes
    objects with +; frames are decoded by progressively chomping a memoryview.
+
+   FFBoxDialect    – Flat Field source, protocol V6+ (software_release >= 6).
+                     32-byte status frame; SHT25 temperature sensor; humidity field.
+   AIVFFBoxDialect – AIV Flat Field source, protocol V4.5 (software_release == 2).
+                     29-byte status frame; no humidity; different temperature sensor
+                     (12-bit signed, LSB = 0.0625 °C).
+   SPEBoxDialect   – Single Photon Electron source, protocol V6+.
+                     33-byte status frame; SHT25 temperature; centre-LED current.
 
 2. Connection layer  (CalBoxConnection)
    Manages the async TCP socket: connect, authenticate, reconnect, flow
@@ -20,7 +28,22 @@ Three-layer architecture
    Builds the OPC UA address-space, polls the connection layer, and exposes
    methods that forward to it.
 
-ICD reference: MST-CAM-ICD-0328-LUPM Ed.1 Rev.3 (June 2024)
+OPC UA node hierarchy
+---------------------
+    Objects/
+      CalibrationLightSource/
+        Monitoring/   -- read-only polled variables
+        Methods:      Start, Stop, Reboot, Reconnect, GetStatus,
+                      SetLeds, SetVoltage, SetDuration, SetFrequency,
+                      SetCurrent, SetWidth, SetControl, Configure
+
+NodeId convention: ns=2;s=CalibrationLightSource.<name>
+  e.g.  ns=2;s=CalibrationLightSource.GetStatus
+        ns=2;s=CalibrationLightSource.Monitoring.temperature
+
+ICD references:
+  MST-CAM-ICD-0328-LUPM Ed.1 Rev.3 (June 2024)  – protocol V6 (FF / SPE)
+  Définition protocole d'échange sur Ethernet V4-5 (2017-11-16) – protocol V4.5 (AIVFF)
 """
 
 from __future__ import annotations
@@ -233,7 +256,7 @@ def _enc_control(state: BoxState) -> bytes:
                   | (int(state.fiber2_out) << 3)
                   | (int(state.lemo_in)    << 4)])
 
-_CURRENT_STEP_MA = 12.0 / 31457
+_CURRENT_STEP_MA = 0.0003814697 # 12.0 / 31457
 
 def _enc_central_current(mA: float) -> bytes:
     mA = _clamp("central_current", mA, 0.0, 31457 * _CURRENT_STEP_MA)
@@ -271,10 +294,18 @@ def _dec_width(mv: memoryview) -> tuple[int, memoryview]:
     return ((mv[0] & _MASK5) << 5) | (mv[1] & _MASK5), mv[2:]
 
 def _dec_temperature(mv: memoryview) -> tuple[float, memoryview]:
-    # SHT25 formula (release 6+): T = code * 175.72 / 4096 - 46.85
+    # SHT25 formula (protocol V6+): T = code * 175.72 / 4096 - 46.85
     sign = -1.0 if (mv[0] & 0x04) else 1.0
     code = ((mv[0] & 0x03) << 10) | ((mv[1] & _MASK5) << 5) | (mv[2] & _MASK5)
     return sign * (code * 175.72 / 4096 - 46.85), mv[3:]
+
+def _dec_temperature_v45(mv: memoryview) -> tuple[float, memoryview]:
+    # Protocol V4.5 (AIVFF): 12-bit magnitude, bit 13 is sign, LSB = 0.0625 °C
+    # Encoding: mv[0] bits[1:0] = code[11:10], mv[1] bits[4:0] = code[9:5],
+    #           mv[2] bits[4:0] = code[4:0]; mv[0] bit[2] = sign
+    sign = -1.0 if (mv[0] & 0x04) else 1.0
+    code = ((mv[0] & 0x03) << 10) | ((mv[1] & _MASK5) << 5) | (mv[2] & _MASK5)
+    return sign * code * 0.0625, mv[3:]
 
 def _dec_faults(mv: memoryview) -> tuple[int, memoryview]:
     return mv[0] & _MASK5, mv[1:]
@@ -441,8 +472,71 @@ class FFBoxDialect(_BoxDialect):
 
 
 # ---------------------------------------------------------------------------
-# SPE dialect  (product code 0xAA)
+# AIVFF dialect  (product code 0xA5, protocol V4.5)
 # ---------------------------------------------------------------------------
+class AIVFFBoxDialect(FFBoxDialect):
+    """
+    AIV Flat Field Calibration Light Source – protocol V4.5.
+
+    Identical wire layout to FFBoxDialect for commands and for the first 22
+    bytes of the status response, with two differences:
+
+    1. No humidity field: the 3 humidity bytes (C23-C25 in V6) are absent.
+    2. Different temperature sensor: 12-bit signed integer, LSB = 0.0625 °C
+       (see _dec_temperature_v45).  The SHT25 formula used by FFBoxDialect
+       does NOT apply here.
+
+    Status response: 29 bytes total (including CR LF)
+      C0-C2   LED on/off
+      C3-C4   voltage set
+      C5-C6   voltage measured
+      C7-C8   duration
+      C9-C12  frequency dividend
+      C13-C15 frequency divider
+      C16-C17 pulse width
+      C18-C20 temperature  (12-bit, LSB=0.0625°C)
+      C21     fault flags
+      C22     control flags
+      C23     product code (0xA5)
+      C24     serial number LSB
+      C25     serial number MSB
+      C26     software release  (== 2 for V4.5)
+      C27     CR (0x0D)
+      C28     LF (0x0A)
+
+    ConfigSet command layout: identical to FFBoxDialect (20 bytes).
+    """
+
+    NAME        = "AIVFF"
+    STATUS_SIZE = 29     # 3 bytes shorter than FF V6: no humidity
+
+    def decode(self, raw: bytes) -> BoxState:
+        s = BoxState()
+        mv = memoryview(raw)
+        s.led_mask,           mv = self._dec_led_mask(mv)     # C0-C2
+        s.voltage_set,        mv = _dec_voltage_set(mv)       # C3-C4
+        s.voltage_actual,     mv = _dec_voltage_actual(mv)    # C5-C6
+        s.duration,           mv = _dec_duration(mv)          # C7-C8
+        s.frequency_dividend, mv = _dec_frequency(mv)         # C9-C12
+        s.frequency_divider,  mv = _dec_divider(mv)           # C13-C15
+        s.width,              mv = _dec_width(mv)             # C16-C17
+        s.temperature,        mv = _dec_temperature_v45(mv)   # C18-C20  (V4.5 sensor)
+        s.faults,             mv = _dec_faults(mv)            # C21
+        (s.light_pulse, s.lemo_out,
+         s.fiber1_out, s.fiber2_out, s.lemo_in), mv = _dec_control(mv)  # C22
+        # No humidity in V4.5 – leave s.humidity at its default (50.0)
+        (s.product_code, s.serial_number,
+         s.software_release), mv = _dec_metadata(mv)          # C23-C26
+        if bytes(mv) != b"\r\n":
+            raise ValueError(f"AIVFF frame: expected CR LF trailer, got {bytes(mv).hex().upper()!r}")
+        if s.software_release != 2:
+            log.warning(
+                "AIVFF: expected software_release=2 (V4.5), got %d "
+                "– wrong --product flag?", s.software_release,
+            )
+        return s
+
+
 class SPEBoxDialect(_BoxDialect):
     """
     Single Photon Electron Calibration Light Source.
@@ -557,9 +651,11 @@ class SPEBoxDialect(_BoxDialect):
 def make_dialect(product: str) -> _BoxDialect:
     if product.upper() == "FF":
         return FFBoxDialect()
+    if product.upper() == "AIVFF":
+        return AIVFFBoxDialect()
     if product.upper() == "SPE":
         return SPEBoxDialect()
-    raise ValueError(f"Unknown product {product!r} – expected 'FF' or 'SPE'")
+    raise ValueError(f"Unknown product {product!r} – expected 'FF', 'AIVFF', or 'SPE'")
 
 
 # ---------------------------------------------------------------------------
@@ -796,20 +892,34 @@ def _unwrap_variants(fn):
 class CalibrationBoxServer:
     """
     OPC UA server that wraps CalBoxConnection and exposes the full
-    NectarCAM calibration box interface.
+    NectarCAM calibration light source interface.
 
-    Node hierarchy (namespace "http://nectarcam.calibrationbox"):
+    Node hierarchy (namespace "http://nectarcam.calibrationlightsource"):
         Objects/
-          <device_root_name>/
-            CalibrationBox/
-              Monitoring/   -- read-only polled variables (one sub-object each)
-              Methods:      Start, Stop, Reboot, Reconnect, GetStatus,
-                            SetLeds, SetVoltage, SetDuration, SetFrequency,
-                            SetCurrent, SetWidth, SetControl, Configure
+          CalibrationLightSource/
+            Monitoring/   -- read-only polled variables
+            Methods:      Start, Stop, Reboot, Reconnect, GetStatus,
+                          SetLeds, SetVoltage, SetDuration, SetFrequency,
+                          SetCurrent, SetWidth, SetControl, Configure
+
+    NodeId convention: ns=2;s=CalibrationLightSource.<n>
+      e.g.  ns=2;s=CalibrationLightSource.GetStatus
+            ns=2;s=CalibrationLightSource.Monitoring.temperature
     """
 
+    # Root browse name – used both as the OPC UA object name and as the
+    # NodeId prefix for all children.
+    _DEVICE_NAME = "CalibrationLightSource"
+
     # (name, initial value, OPC UA variant type)
+    # Each entry becomes a variable node at:
+    #   ns=2;s=CalibrationLightSource.Monitoring.<name>
+    # host, port, dialect are static connection-identity variables written
+    # once at startup; the remainder are polled live from the device.
     _MONITORING_VARS: ClassVar[list[tuple]] = [
+        ("host",               "",      ua.VariantType.String),
+        ("port",               0,       ua.VariantType.Int64),
+        ("dialect",            "",      ua.VariantType.String),
         ("led_mask",           8191,    ua.VariantType.Int64),
         ("voltage_set",        10.0,    ua.VariantType.Double),
         ("voltage_actual",     10.0,    ua.VariantType.Double),
@@ -835,14 +945,12 @@ class CalibrationBoxServer:
         port:             int   = 50001,
         password:         str   = "",
         product:          str   = "FF",
-        device_root_name: str   = "NectarCAM",
         opcua_endpoint:   str   = "opc.tcp://0.0.0.0:4840/nectarcam/",
         opcua_users:      dict  = None,
         poll_interval:    float = 1.0,
         auto_reconnect:   bool  = False,
         min_cmd_interval: float = 0.0,
     ):
-        self.device_root_name = device_root_name
         self.opcua_users      = opcua_users or {}
         self.poll_interval    = poll_interval
         self.auto_reconnect   = auto_reconnect
@@ -875,7 +983,7 @@ class CalibrationBoxServer:
 
         srv = Server(user_manager=user_mgr)
         srv.set_endpoint(endpoint)
-        srv.set_server_name("NectarCAM CalibrationBox")
+        srv.set_server_name("NectarCAM CalibrationLightSource")
         if self.opcua_users:
             srv.set_security_IDs(["Anonymous", "Username"])
         logging.getLogger("asyncua.server.address_space").addFilter(
@@ -886,21 +994,33 @@ class CalibrationBoxServer:
 
     async def _init_server(self):
         await self.server.init()
-        ns     = await self.server.register_namespace("http://nectarcam.calibrationbox")
-        root   = await self.server.nodes.objects.add_object(ns, self.device_root_name)
-        device = await root.add_object(ns, "CalibrationBox")
+        ns     = await self.server.register_namespace(
+            "http://nectarcam.calibrationlightsource")
+        device = await self.server.nodes.objects.add_object(
+            ua.NodeId(self._DEVICE_NAME, ns),
+            ua.QualifiedName(self._DEVICE_NAME, ns),
+        )
         await self._build_monitoring(ns, device)
         await self._build_methods(ns, device)
+        # Write static connection-identity variables once at startup
+        await self._set_var("host",    self.connection.host)
+        await self._set_var("port",    self.connection.port)
+        await self._set_var("dialect", self.connection.dialect.NAME)
 
     # ----------------------------------------------------------------
     # Monitoring nodes
     # ----------------------------------------------------------------
 
     async def _build_monitoring(self, ns: int, device):
-        monitoring = await device.add_object(ns, "Monitoring")
+        mon_node_id = ua.NodeId(f"{self._DEVICE_NAME}.Monitoring", ns)
+        monitoring  = await device.add_object(
+            mon_node_id, ua.QualifiedName("Monitoring", ns))
         for name, default, vtype in self._MONITORING_VARS:
-            container = await monitoring.add_object(ns, name)
-            var = await container.add_variable(ns, name + "_v", ua.Variant(default, vtype))
+            node_id = ua.NodeId(f"{self._DEVICE_NAME}.Monitoring.{name}", ns)
+            var = await monitoring.add_variable(
+                node_id, ua.QualifiedName(name, ns),
+                ua.Variant(default, vtype),
+            )
             await var.set_read_only()
             self._vars[name] = var
 
@@ -927,9 +1047,12 @@ class CalibrationBoxServer:
     # ----------------------------------------------------------------
 
     async def _build_methods(self, ns: int, device):
+        def node_id(name):
+            return ua.NodeId(f"{self._DEVICE_NAME}.{name}", ns)
+
         async def add(name, cb, in_types=()):
             await device.add_method(
-                ua.NodeId(name, ns), ua.QualifiedName(name, ns),
+                node_id(name), ua.QualifiedName(name, ns),
                 cb, list(in_types), [],
             )
 
@@ -1175,12 +1298,13 @@ class CalibrationBoxServer:
 # ---------------------------------------------------------------------------
 
 def _parse_args():
-    p = argparse.ArgumentParser(description="NectarCAM Calibration Box OPC UA Server")
+    p = argparse.ArgumentParser(
+        description="NectarCAM Calibration Light Source OPC UA Server")
     p.add_argument("--address",          default="10.11.4.69")
     p.add_argument("--port",             type=int, default=50001)
     p.add_argument("--passwd",           default="", metavar="PASSWORD")
-    p.add_argument("--product",          required=True, choices=["SPE", "FF"])
-    p.add_argument("--device-root-name", default="NectarCAM")
+    p.add_argument("--product",          required=True, choices=["SPE", "FF", "AIVFF"],
+                   help="Device variant: FF (Flat Field V6+), AIVFF (AIV FF V4.5), SPE (Single Photon)")
     p.add_argument("--opcua-endpoint",   default="opc.tcp://0.0.0.0:4840/nectarcam/")
     p.add_argument("--opcua-user",       action="append", metavar="USER:PASS")
     p.add_argument("--log-level",        default="INFO",
@@ -1207,7 +1331,6 @@ async def _main():
         port             = args.port,
         password         = args.passwd,
         product          = args.product,
-        device_root_name = args.device_root_name,
         opcua_endpoint   = args.opcua_endpoint,
         opcua_users      = opcua_users,
         poll_interval    = args.poll_interval,

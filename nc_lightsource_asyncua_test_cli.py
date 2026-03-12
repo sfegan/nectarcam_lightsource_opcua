@@ -1,9 +1,9 @@
 """
-nc_lightsource_opcua_test_cli.py
-NectarCAM Calibration Box OPC UA Test CLI
+nc_lightsource_asyncua_test_cli.py
+NectarCAM Calibration Light Source OPC UA Test CLI
 
 Connects to the CalibrationBoxServer and exposes all methods
-defined in nc_lightsource_opcua_server.py via an interactive CLI.
+defined in nc_lightsource_asyncua_server.py via an interactive CLI.
 
 Requires: asyncua  (pip install asyncua)
 """
@@ -61,7 +61,7 @@ class CalibrationBoxClient:
         await self.client.connect()
         root = self.client.get_root_node()
         self.device = await root.get_child(
-            ["0:Objects", "2:NectarCAM", "2:CalibrationBox"]
+            ["0:Objects", "2:CalibrationLightSource"]
         )
         self.monitoring = await self.device.get_child(["2:Monitoring"])
         print("Connected to server.")
@@ -86,30 +86,16 @@ class CalibrationBoxClient:
     # Variable read
     # ----------------------------------------------------------
     async def read_variable(self, name: str):
-        """
-        The server nests each variable under a sub-object:
-            Monitoring/<name>/<name>_v
-        """
-        try:
-            container = await self.monitoring.get_child([f"2:{name}"])
-            node      = await container.get_child([f"2:{name}_v"])
-            value     = await node.get_value()
-            print(f"  {name} = {value}")
-        except Exception:
-            # Fallback: try the node directly (flat layout)
-            node  = await self.monitoring.get_child([f"2:{name}"])
-            value = await node.get_value()
-            print(f"  {name} = {value}")
+        """Read a single variable from Monitoring/<name>."""
+        node  = await self.monitoring.get_child([f"2:{name}"])
+        value = await node.get_value()
+        print(f"  {name} = {value}")
 
     async def read_all(self):
         """Read every variable under Monitoring."""
-        for container in await self.monitoring.get_children():
-            name = (await container.read_browse_name()).Name
-            try:
-                leaf  = await container.get_child([f"2:{name}_v"])
-                value = await leaf.get_value()
-            except Exception:
-                value = await container.get_value()
+        for node in await self.monitoring.get_children():
+            name  = (await node.read_browse_name()).Name
+            value = await node.get_value()
             print(f"  {name} = {value}")
 
     # ----------------------------------------------------------
@@ -126,14 +112,10 @@ class CalibrationBoxClient:
         )
         self._monitored = {}
 
-        for container in await self.monitoring.get_children():
-            cname = (await container.read_browse_name()).Name
-            try:
-                leaf = await container.get_child([f"2:{cname}_v"])
-            except Exception:
-                leaf = container
-            await self.subscription.subscribe_data_change(leaf)
-            self._monitored[leaf.nodeid] = cname
+        for node in await self.monitoring.get_children():
+            name = (await node.read_browse_name()).Name
+            await self.subscription.subscribe_data_change(node)
+            self._monitored[node.nodeid] = name
 
         self._sub_handler.node_names = self._monitored
         print(f"  Monitoring {len(self._monitored)} variable(s). "
@@ -155,7 +137,7 @@ class CalibrationBoxClient:
 # ==========================================================
 HELP = """
 ╔══════════════════════════════════════════════════════════════╗
-║        NectarCAM Calibration Box — OPC UA Test CLI           ║
+║     NectarCAM Calibration Light Source — OPC UA Test CLI     ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Device commands                                             ║
 ║    start                    Enable light pulses              ║
@@ -185,6 +167,12 @@ HELP = """
 ║                                                              ║
 ║  Monitoring                                                  ║
 ║    read    <variable>       Read one monitoring variable     ║
+║      static: host, port, dialect                             ║
+║      live:   led_mask, voltage_set, voltage_actual,          ║
+║              duration, frequency_dividend, frequency_divider,║
+║              width, temperature, humidity, faults,           ║
+║              light_pulse, lemo_out, fiber1_out, fiber2_out,  ║
+║              lemo_in, central_current, cls_state             ║
 ║    readall                  Read all monitoring variables    ║
 ║    monitor                  Subscribe to all changes (live)  ║
 ║    unmonitor                Cancel subscription              ║
@@ -207,7 +195,7 @@ async def run_cli(cli: CalibrationBoxClient):
         try:
             # Run blocking input() in a thread executor so the event loop
             # stays alive (needed for subscription callbacks to fire).
-            raw = await loop.run_in_executor(None, lambda: input("calbox>> "))
+            raw = await loop.run_in_executor(None, lambda: input("cls>> "))
             raw = raw.strip()
         except (EOFError, KeyboardInterrupt):
             print()
@@ -350,7 +338,7 @@ async def run_cli(cli: CalibrationBoxClient):
 # ==========================================================
 def parse_args():
     p = argparse.ArgumentParser(
-        description="NectarCAM CalibrationBox OPC UA Test CLI"
+        description="NectarCAM Calibration Light Source OPC UA Test CLI"
     )
     p.add_argument("--endpoint", default=DEFAULT_ENDPOINT,
                    help="OPC UA server endpoint URL")
