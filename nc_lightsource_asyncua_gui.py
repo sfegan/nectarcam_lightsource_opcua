@@ -335,7 +335,19 @@ class GaugeWidget(tk.Frame):
 # ===========================================================================
 # LED array widget
 # ===========================================================================
+LED_ON_ENABLED  = "#3ecf8e"   # green — selected AND light source enabled
+LED_ON_DISABLED = "#4488ff"   # blue  — selected, light source off
+
 class LEDArrayWidget(tk.Frame):
+    """
+    Two independent masks:
+      _sel_mask   — user selection (what will be sent on Apply)
+      _dev_mask   — last reported mask from the device (shown as 'x' overlay)
+
+    LED fill colour tracks _enabled:
+      True  → selected LEDs shown in green (LED_ON_ENABLED)
+      False → selected LEDs shown in blue  (LED_ON_DISABLED)
+    """
 
     LED_POSITIONS = [
         ("L11", 0, 0), ("L12", 0, 2), ("L13", 0, 4),
@@ -348,43 +360,82 @@ class LEDArrayWidget(tk.Frame):
 
     def __init__(self, parent, on_mask_change=None, **kw):
         super().__init__(parent, bg=BG2, **kw)
-        self._mask           = 0
+        self._sel_mask       = 0      # user-selected (pending Apply)
+        self._dev_mask       = 0      # reported by device
+        self._enabled        = False  # light source running?
+        self._initialised    = False  # selector seeded from device yet?
         self._on_mask_change = on_mask_change
         self._ovals          = {}
+        self._x_texts        = {}     # num -> canvas text id for 'x' marker
         self._canvases       = {}
         self._build()
 
     def _build(self):
         R = 22; PAD = 6; SIZE = R * 2 + PAD
+        # Big oval: (PAD//2, PAD//2) -> (SIZE-PAD//2, SIZE-PAD//2)
+        # so its centre is exactly (SIZE//2, SIZE//2)
+        cx = SIZE // 2          # = 25
+        cy = SIZE // 2          # = 25
+        r_dot = R // 3          # one-third the LED radius (≈7 px)
         for (label, row, col), num in zip(self.LED_POSITIONS, self.LED_NUMBERS):
             c = tk.Canvas(self, width=SIZE, height=SIZE + 14,
-                          bg=BG2, highlightthickness=0)
+                          bg=BG2, highlightthickness=0, cursor="hand2")
             c.grid(row=row, column=col, padx=4, pady=4)
             oval = c.create_oval(PAD//2, PAD//2, SIZE - PAD//2, SIZE - PAD//2,
                                  fill=LED_OFF, outline=LED_RING, width=2)
+            # Small white circle — device-reported mask indicator, centred on LED
+            dot = c.create_oval(cx - r_dot, cy - r_dot,
+                                cx + r_dot, cy + r_dot,
+                                fill="white", outline="", state="hidden")
             c.create_text(SIZE // 2, SIZE + 6, text=label,
                           fill=TEXT_DIM, font=("Helvetica", 8))
             self._ovals[num]    = oval
+            self._x_texts[num]  = dot
             self._canvases[num] = c
             c.bind("<Button-1>", lambda e, n=num: self._toggle(n))
 
     def _toggle(self, num):
-        self._mask ^= (1 << (num - 1))
+        self._sel_mask ^= (1 << (num - 1))
         self._refresh()
         if self._on_mask_change:
-            self._on_mask_change(self._mask)
+            self._on_mask_change(self._sel_mask)
 
+    # ---- public setters ------------------------------------------------
     def set_mask(self, mask: int):
-        self._mask = mask
+        """Set the user-selection mask (e.g. from bitmask entry)."""
+        self._sel_mask = mask
+        self._refresh()
+
+    def set_device_mask(self, mask: int):
+        """Update the device-reported mask (shown as dot overlay).
+        On the first call the selector is also initialised to match."""
+        self._dev_mask = mask
+        if not self._initialised:
+            self._sel_mask = mask
+            self._initialised = True
+            if self._on_mask_change:
+                self._on_mask_change(self._sel_mask)
+        self._refresh()
+
+    def set_enabled(self, enabled: bool):
+        """Set whether the light source is currently running."""
+        self._enabled = enabled
         self._refresh()
 
     def get_mask(self) -> int:
-        return self._mask
+        return self._sel_mask
 
+    # ---- rendering --------------------------------------------------------
     def _refresh(self):
+        on_col = LED_ON_ENABLED if self._enabled else LED_ON_DISABLED
         for num, oval in self._ovals.items():
-            lit = bool(self._mask & (1 << (num - 1)))
-            self._canvases[num].itemconfig(oval, fill=LED_ON if lit else LED_OFF)
+            bit = 1 << (num - 1)
+            selected = bool(self._sel_mask & bit)
+            on_device = bool(self._dev_mask & bit)
+            self._canvases[num].itemconfig(oval,
+                fill=on_col if selected else LED_OFF)
+            self._canvases[num].itemconfig(self._x_texts[num],
+                state="normal" if on_device else "hidden")
 
 
 # ===========================================================================
@@ -848,7 +899,14 @@ class CalibBoxGUI(tk.Tk):
         ep = self._ep_var.get()
         self._set_status(f"Connected — {ep}")
         self._log(f"Connected to {ep}", ACCENT2)
+        # Read all variables immediately so the UI reflects current state
+        # before the first subscription notification or poll arrives
+        def on_initial_read(data):
+            self._apply_monitoring_data(data)
+        self._dispatch(self._client.read_all(), on_done=on_initial_read)
         self._schedule_poll()
+        # Auto-subscribe to live data changes
+        self._start_monitoring()
 
     def _on_connect_failed(self, exc):
         self._conn_ind.set_state(False)
@@ -861,6 +919,8 @@ class CalibBoxGUI(tk.Tk):
         self._cancel_poll()
         self._connected = False
         self._conn_ind.set_state(False)
+        self._mon_ind.set_state(False)
+        self._led_array._initialised = False
         self._conn_btn.config(text="Connect", bg=ACCENT)
         self._set_status("Disconnecting…")
         if self._client:
@@ -921,7 +981,11 @@ class CalibBoxGUI(tk.Tk):
                 self._uv_ind.set_state(bool(faults & 0x01))  # D0 under-voltage
                 self._ov_ind.set_state(bool(faults & 0x02))  # D1 over-voltage
             elif n == "light_pulse":
-                self._pulse_ind.set_state(bool(value))
+                enabled = bool(value)
+                self._pulse_ind.set_state(enabled)
+                self._led_array.set_enabled(enabled)
+            elif n == "led_mask":
+                self._led_array.set_device_mask(int(value))
             elif n == "cls_state":
                 label, col = self._STATE_MAP.get(int(value), ("Unknown", TEXT_DIM))
                 if self._info_state_var:
