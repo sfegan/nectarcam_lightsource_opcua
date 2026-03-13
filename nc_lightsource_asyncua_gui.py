@@ -366,30 +366,31 @@ class LEDArrayWidget(tk.Frame):
         self._initialised    = False  # selector seeded from device yet?
         self._on_mask_change = on_mask_change
         self._ovals          = {}
-        self._x_texts        = {}     # num -> canvas text id for 'x' marker
+        self._x_texts        = {}     # num -> canvas item id for status indicator
         self._canvases       = {}
         self._build()
 
     def _build(self):
         R = 22; PAD = 6; SIZE = R * 2 + PAD
-        # Big oval: (PAD//2, PAD//2) -> (SIZE-PAD//2, SIZE-PAD//2)
-        # so its centre is exactly (SIZE//2, SIZE//2)
-        cx = SIZE // 2          # = 25
-        cy = SIZE // 2          # = 25
-        r_dot = R // 3          # one-third the LED radius (≈7 px)
+        cx = SIZE // 2   # 25 — exact centre of the selector oval
+        cy = SIZE // 2   # 25
+        self._cx    = cx
+        self._cy    = cy
+        self._R     = R
+        self._R_dot = int(R * 0.35)  # white dot radius (~1/3 of selector)
+        r = self._R_dot
         for (label, row, col), num in zip(self.LED_POSITIONS, self.LED_NUMBERS):
             c = tk.Canvas(self, width=SIZE, height=SIZE + 14,
                           bg=BG2, highlightthickness=0, cursor="hand2")
             c.grid(row=row, column=col, padx=4, pady=4)
-            oval = c.create_oval(PAD//2, PAD//2, SIZE - PAD//2, SIZE - PAD//2,
-                                 fill=LED_OFF, outline=LED_RING, width=2)
-            # Small white circle — device-reported mask indicator, centred on LED
-            dot = c.create_oval(cx - r_dot, cy - r_dot,
-                                cx + r_dot, cy + r_dot,
+            outer = c.create_oval(PAD//2, PAD//2, SIZE - PAD//2, SIZE - PAD//2,
+                                  fill=LED_OFF, outline=LED_RING, width=2)
+            # White dot centred on the selector — shows device-reported state
+            dot = c.create_oval(cx-r, cy-r, cx+r, cy+r,
                                 fill="white", outline="", state="hidden")
             c.create_text(SIZE // 2, SIZE + 6, text=label,
                           fill=TEXT_DIM, font=("Helvetica", 8))
-            self._ovals[num]    = oval
+            self._ovals[num]    = outer
             self._x_texts[num]  = dot
             self._canvases[num] = c
             c.bind("<Button-1>", lambda e, n=num: self._toggle(n))
@@ -427,15 +428,20 @@ class LEDArrayWidget(tk.Frame):
 
     # ---- rendering --------------------------------------------------------
     def _refresh(self):
+        # Selector circle shows user intent (blue/green/dark).
+        # White dot in the centre shows what the device currently has on.
         on_col = LED_ON_ENABLED if self._enabled else LED_ON_DISABLED
-        for num, oval in self._ovals.items():
-            bit = 1 << (num - 1)
-            selected = bool(self._sel_mask & bit)
+        cx, cy, r = self._cx, self._cy, self._R_dot
+
+        for num, outer in self._ovals.items():
+            bit       = 1 << (num - 1)
+            selected  = bool(self._sel_mask & bit)
             on_device = bool(self._dev_mask & bit)
-            self._canvases[num].itemconfig(oval,
-                fill=on_col if selected else LED_OFF)
-            self._canvases[num].itemconfig(self._x_texts[num],
-                state="normal" if on_device else "hidden")
+            c         = self._canvases[num]
+
+            c.itemconfig(outer, fill=on_col if selected else LED_OFF)
+            c.itemconfig(self._x_texts[num],
+                         state="normal" if on_device else "hidden")
 
 
 # ===========================================================================
@@ -762,7 +768,12 @@ class CalibBoxGUI(tk.Tk):
         entry(r, self._freq_dvr_var, width=5)
         tk.Label(r, text="Hz", bg=BG2, fg=TEXT_DIM,
                  font=("Helvetica", 9)).pack(side="left", padx=2)
+        self._freq_result = tk.Label(r, text="5000 Hz", bg=BG2, fg=ACCENT,
+                                     font=("Helvetica", 9, "bold"))
+        self._freq_result.pack(side="left", padx=4)
         setbtn(r, self._apply_frequency)
+        self._freq_div_var.trace_add("write", self._update_freq_label)
+        self._freq_dvr_var.trace_add("write", self._update_freq_label)
 
         # Pulse Width
         r = tk.Frame(inner, bg=BG2); r.pack(fill="x", pady=2)
@@ -1028,6 +1039,18 @@ class CalibBoxGUI(tk.Tk):
         try:
             self._pw_result.config(
                 text=f"{int(self._width_var.get()) * 62.5:.0f} ns")
+        except Exception:
+            pass
+
+    def _update_freq_label(self, *_):
+        try:
+            d = float(self._freq_div_var.get())
+            r = int(self._freq_dvr_var.get())
+            hz = d / r if r else 0.0
+            if hz >= 1000:
+                self._freq_result.config(text=f"{hz/1000:.3g} kHz")
+            else:
+                self._freq_result.config(text=f"{hz:.3g} Hz")
         except Exception:
             pass
 
