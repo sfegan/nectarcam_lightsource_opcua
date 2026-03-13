@@ -590,6 +590,9 @@ class CalibBoxGUI(tk.Tk):
         self._build_params_panel(right)
         self._build_monitoring_panel(right)
 
+        # Auto-connect on startup
+        self.after(200, self._do_connect)
+
     def _build_led_panel(self, parent):
         sec = self._section(parent, "LED Array")
         sec.pack(fill="x", pady=(0, 8))
@@ -976,6 +979,8 @@ class CalibBoxGUI(tk.Tk):
                 self._temp_var.set(f"{float(value):.2f}")
             elif n == "voltage_actual":
                 self._gauge.set_value(float(value))
+            elif n == "voltage_set":
+                self._volt_set_var.set(round(float(value), 4))
             elif n == "faults":
                 faults = int(value)
                 self._uv_ind.set_state(bool(faults & 0x01))  # D0 under-voltage
@@ -984,6 +989,25 @@ class CalibBoxGUI(tk.Tk):
                 enabled = bool(value)
                 self._pulse_ind.set_state(enabled)
                 self._led_array.set_enabled(enabled)
+                self._enabled_var.set(enabled)
+            elif n == "lemo_out":
+                self._lemo_var.set(bool(value))
+            elif n == "fiber1_out":
+                self._fiber1_var.set(bool(value))
+            elif n == "fiber2_out":
+                self._fiber2_var.set(bool(value))
+            elif n == "lemo_in":
+                self._lemo_in_var.set(bool(value))
+            elif n == "frequency_dividend":
+                self._freq_div_var.set(round(float(value), 4))
+            elif n == "frequency_divider":
+                self._freq_dvr_var.set(int(value))
+            elif n == "width":
+                self._width_var.set(int(value))
+            elif n == "duration":
+                self._duration_var.set(int(value))
+            elif n == "central_current":
+                self._current_var.set(round(float(value), 4))
             elif n == "led_mask":
                 self._led_array.set_device_mask(int(value))
             elif n == "cls_state":
