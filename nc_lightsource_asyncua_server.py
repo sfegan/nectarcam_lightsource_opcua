@@ -291,10 +291,10 @@ def _dec_width(mv: memoryview) -> tuple[int, memoryview]:
     return ((mv[0] & _MASK5) << 5) | (mv[1] & _MASK5), mv[2:]
 
 def _dec_temperature(mv: memoryview) -> tuple[float, memoryview]:
-    # SHT25 formula (protocol V6+): T = code * 175.72 / 4096 - 46.85
-    sign = -1.0 if (mv[0] & 0x04) else 1.0
+    # SHT25 (protocol V6+): unsigned 12-bit code, negative temps emerge naturally
+    # from the linear formula. No sign bit.
     code = ((mv[0] & 0x03) << 10) | ((mv[1] & _MASK5) << 5) | (mv[2] & _MASK5)
-    return sign * (code * 175.72 / 4096 - 46.85), mv[3:]
+    return code * 175.72 / 4096 - 46.85, mv[3:]
 
 def _dec_temperature_v45(mv: memoryview) -> tuple[float, memoryview]:
     # Protocol V4.5 (AIVFF) – formula from CalBoxConfig.cpp L616:
@@ -302,12 +302,9 @@ def _dec_temperature_v45(mv: memoryview) -> tuple[float, memoryview]:
     #             +  1.0    * (C19 & 0x1F)   # C19 5 LSB bits → integer degrees
     #             +  0.0625 * (C20 & 0x1F)   # C20 5 LSB bits → fractional degrees
     # Sign is carried in bit 2 of C18 (same position as the SHT25 encoder).
-    # But this doesn't match the ICD
     sign      = -1.0 if (mv[0] & 0x04) else 1.0
     abs_value = 32.0 * (mv[0] & 0x03) + 1.0 * (mv[1] & _MASK5) + 0.0625 * (mv[2] & _MASK5)
     return sign * abs_value, mv[3:]
-    # code = ((mv[0] & 0x03) << 10) | ((mv[1] & _MASK5) << 5) | (mv[2] & _MASK5)
-    # return sign * code * 0.0625, mv[3:]
 
 def _dec_faults(mv: memoryview) -> tuple[int, memoryview]:
     return mv[0] & _MASK5, mv[1:]
