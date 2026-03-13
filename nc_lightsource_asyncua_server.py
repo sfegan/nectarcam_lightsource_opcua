@@ -87,10 +87,9 @@ class _SuppressUaStatusCodeTracebacks(logging.Filter):
 # Shared enumerations
 # ---------------------------------------------------------------------------
 class DeviceState(IntEnum):
-    Disabled = 0
-    Enabled  = 1
-    Fault    = 2
-    Offline  = 3
+    Offline  = 0   # OPC UA server not connected to the source
+    Disabled = 1   # Connected, light_pulse is False
+    Enabled  = 2   # Connected, light_pulse is True
 
 
 class Cmd(IntEnum):
@@ -167,8 +166,6 @@ class BoxState:
 
     @property
     def device_state(self) -> DeviceState:
-        if self.faults:
-            return DeviceState.Fault
         return DeviceState.Enabled if self.light_pulse else DeviceState.Disabled
 
 
@@ -300,12 +297,17 @@ def _dec_temperature(mv: memoryview) -> tuple[float, memoryview]:
     return sign * (code * 175.72 / 4096 - 46.85), mv[3:]
 
 def _dec_temperature_v45(mv: memoryview) -> tuple[float, memoryview]:
-    # Protocol V4.5 (AIVFF): 12-bit magnitude, bit 13 is sign, LSB = 0.0625 °C
-    # Encoding: mv[0] bits[1:0] = code[11:10], mv[1] bits[4:0] = code[9:5],
-    #           mv[2] bits[4:0] = code[4:0]; mv[0] bit[2] = sign
-    sign = -1.0 if (mv[0] & 0x04) else 1.0
-    code = ((mv[0] & 0x03) << 10) | ((mv[1] & _MASK5) << 5) | (mv[2] & _MASK5)
-    return sign * code * 0.0625, mv[3:]
+    # Protocol V4.5 (AIVFF) – formula from CalBoxConfig.cpp L616:
+    #   abs_value = 32.0    * (C18 & 0x03)   # C18 2 LSB bits → integer degrees x32
+    #             +  1.0    * (C19 & 0x1F)   # C19 5 LSB bits → integer degrees
+    #             +  0.0625 * (C20 & 0x1F)   # C20 5 LSB bits → fractional degrees
+    # Sign is carried in bit 2 of C18 (same position as the SHT25 encoder).
+    # But this doesn't match the ICD
+    sign      = -1.0 if (mv[0] & 0x04) else 1.0
+    abs_value = 32.0 * (mv[0] & 0x03) + 1.0 * (mv[1] & _MASK5) + 0.0625 * (mv[2] & _MASK5)
+    return sign * abs_value, mv[3:]
+    # code = ((mv[0] & 0x03) << 10) | ((mv[1] & _MASK5) << 5) | (mv[2] & _MASK5)
+    # return sign * code * 0.0625, mv[3:]
 
 def _dec_faults(mv: memoryview) -> tuple[int, memoryview]:
     return mv[0] & _MASK5, mv[1:]

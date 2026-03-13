@@ -664,7 +664,7 @@ class CalibBoxGUI(tk.Tk):
         self._info_dialect_var = tk.StringVar(value="—")
         self._info_state_var   = tk.StringVar(value="—")
 
-        _STATE_LABELS = {0: "Disabled", 1: "Enabled", 2: "Fault", 3: "Offline"}
+        _STATE_LABELS = {0: "Offline", 1: "Disabled", 2: "Enabled"}
 
         def lbl_row(fr, label, var, color=TEXT):
             tk.Label(fr, text=label, bg=BG2, fg=TEXT_DIM,
@@ -955,8 +955,8 @@ class CalibBoxGUI(tk.Tk):
             self._update_var(name, value)
 
     # Map cls_state int to (label, colour)
-    _STATE_MAP = {0: ("Disabled", TEXT_DIM), 1: ("Enabled", ACCENT2),
-                  2: ("Fault",    RED),       3: ("Offline", YELLOW)}
+    _STATE_MAP = {0: ("Offline", YELLOW), 1: ("Disabled", TEXT_DIM),
+                  2: ("Enabled", ACCENT2)}
 
     def _update_var(self, name: str, value):
         n = name.lower()
