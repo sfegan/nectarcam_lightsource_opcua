@@ -478,7 +478,6 @@ class CalibBoxGUI(tk.Tk):
         self._password  = password
         self._client    = None
         self._connected = False
-        self._poll_job  = None
         self._info_host_var    = None
         self._info_port_var    = None
         self._info_dialect_var = None
@@ -903,12 +902,11 @@ class CalibBoxGUI(tk.Tk):
         self._set_status(f"Connected — {ep}")
         self._log(f"Connected to {ep}", ACCENT2)
         # Read all variables immediately so the UI reflects current state
-        # before the first subscription notification or poll arrives
+        # before the first subscription notification arrives
         def on_initial_read(data):
             self._apply_monitoring_data(data)
         self._dispatch(self._client.read_all(), on_done=on_initial_read)
-        self._schedule_poll()
-        # Auto-subscribe to live data changes
+        # Subscribe for live data changes (replaces polling entirely)
         self._start_monitoring()
 
     def _on_connect_failed(self, exc):
@@ -919,7 +917,6 @@ class CalibBoxGUI(tk.Tk):
         self._log(msg, RED)
 
     def _do_disconnect(self):
-        self._cancel_poll()
         self._connected = False
         self._conn_ind.set_state(False)
         self._mon_ind.set_state(False)
@@ -934,28 +931,6 @@ class CalibBoxGUI(tk.Tk):
             self._client = None
         else:
             self._set_status("Disconnected")
-
-    # -----------------------------------------------------------------------
-    # Periodic poll
-    # -----------------------------------------------------------------------
-    def _schedule_poll(self, interval_ms=5000):
-        self._cancel_poll()
-        self._poll_job = self.after(interval_ms, self._do_poll)
-
-    def _cancel_poll(self):
-        if self._poll_job:
-            self.after_cancel(self._poll_job)
-            self._poll_job = None
-
-    def _do_poll(self):
-        if not self._connected or not self._client:
-            return
-        def ok(data):
-            self._apply_monitoring_data(data)
-            self._schedule_poll()
-        def err(_):
-            self._schedule_poll()
-        self._dispatch(self._client.read_all(), on_done=ok, on_error=err)
 
     # -----------------------------------------------------------------------
     # Data change callback — called from the asyncua loop thread
@@ -1220,7 +1195,6 @@ class CalibBoxGUI(tk.Tk):
 
     # -----------------------------------------------------------------------
     def _on_close(self):
-        self._cancel_poll()
         if self._client:
             # Best-effort async disconnect; don't wait
             self._async.submit(self._client.disconnect())
