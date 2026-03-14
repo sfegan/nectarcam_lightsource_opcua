@@ -4,9 +4,10 @@ This repository implements a simple (and probably not very robust) reimplementat
 
 It contains three elements
 1. `nc_lightsource_asyncua_server.py`: the OPCUA server which acts as a bridge between the socket based protocol used by the light sources and the OPC UA network,
-2. `nc_lightsource_asyncua_test_cli.py`: a simple test untility that creats a text interface to call the OPC UA methods and read/monitor the variables, and
-3. `nc_lightsource_emulator.py`: a simple emulator for the light source that responds to commands over the TCP port and from the terminal.
-
+2. `nc_lightsource_asyncua_gui.py`: a Python/TK-based GUI that can send commands and monitor the light source via the OPC UA server.
+3. `nc_lightsource_asyncua_test_cli.py`: a simple test untility that creats a text interface to call the OPC UA methods and read/monitor the variables, and
+4. `nc_lightsource_emulator.py`: a simple emulator for the light source that responds to commands over the TCP port and from the terminal.
+ 
 The three components can be used together to test the server. In three terminal windows run :
 
 ### Terminal 1: run the light source emulator
@@ -17,7 +18,11 @@ The three components can be used together to test the server. In three terminal 
 
 `# python3 nc_lightsource_asyncua_server.py --opcua-endpoint=opc.tcp://localhost:4840/nectarcam/ --address=localhost --passwd HELLO --product SPE --auto-reconnect`
 
-### Terminal 3: run the OPC UA test CLI
+### Terminal 3: run the OPC UA GUI or test CLI
+
+`# python3 nc_lightsource_asyncua_gui.py --endpoint opc.tcp://localhost:4840/nectarcam/`
+
+or
 
 `# python3 nc_lightsource_asyncua_test_cli.py --endpoint opc.tcp://localhost:4840/nectarcam/`
 
