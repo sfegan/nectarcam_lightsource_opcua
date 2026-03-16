@@ -18,8 +18,8 @@ ExecStart=/opt/nectarcam/venv/bin/python \
     /opt/nectarcam/nc_lightsource_asyncua_server.py \
     --product FF \
     --address 10.11.4.69 \
-    --port 50001 \
     --opcua-endpoint opc.tcp://0.0.0.0:4840/nectarcam/ \
+    --opcua-namespace http://cta-observatory.org/nectarcam/1/calibrationlightsource/FF \
     --auto-reconnect \
     --poll-interval 1.0 \
     --log-level INFO
