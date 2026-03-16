@@ -971,6 +971,7 @@ class CalibrationBoxServer:
         password:         str   = "",
         product:          str   = "FF",
         opcua_endpoint:   str   = "opc.tcp://0.0.0.0:4840/nectarcam/",
+        opcua_namespace:  str   = None,
         opcua_users:      dict  = None,
         poll_interval:    float = 1.0,
         auto_reconnect:   bool  = False,
@@ -979,6 +980,11 @@ class CalibrationBoxServer:
         self.opcua_users      = opcua_users or {}
         self.poll_interval    = poll_interval
         self.auto_reconnect   = auto_reconnect
+        # Default namespace encodes the product; caller may override via
+        # --opcua-namespace to add telescope number, site, etc.
+        self.opcua_namespace  = (opcua_namespace or
+            f"http://cta-observatory.org/nectarcam/calibrationlightsource"
+            f"/{product.lower()}")
 
         self.connection = CalBoxConnection(
             host=host, port=port,
@@ -1022,8 +1028,8 @@ class CalibrationBoxServer:
         # Without this, nodes added in a previous run are restored from
         # server_nodes.xml and re-adding them raises BadNodeIdExists.
         await self.server.init(shelf_file=None)
-        ns     = await self.server.register_namespace(
-            "http://nectarcam.calibrationlightsource")
+        log.info("OPC UA namespace: %s", self.opcua_namespace)
+        ns     = await self.server.register_namespace(self.opcua_namespace)
         device = await self.server.nodes.objects.add_object(
             ua.NodeId(self._DEVICE_NAME, ns),
             ua.QualifiedName(self._DEVICE_NAME, ns),
@@ -1405,6 +1411,12 @@ def _parse_args():
     p.add_argument("--product",          required=True, choices=["SPE", "FF", "AIVFF"],
                    help="Device variant: FF (Flat Field V6+), AIVFF (AIV FF V4.5), SPE (Single Photon)")
     p.add_argument("--opcua-endpoint",   default="opc.tcp://0.0.0.0:4840/nectarcam/")
+    p.add_argument("--opcua-namespace",  default=None,
+                   metavar="URI",
+                   help="OPC UA namespace URI (default: "
+                        "http://cta-observatory.org/nectarcam/calibrationlightsource/<product>). "
+                        "Include telescope number for multi-telescope deployments, e.g. "
+                        "http://cta-observatory.org/nectarcam/1/calibrationlightsource/FF")
     p.add_argument("--opcua-user",       action="append", metavar="USER:PASS")
     p.add_argument("--log-level",        default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -1432,6 +1444,7 @@ async def _main() -> int:
         password         = args.passwd,
         product          = args.product,
         opcua_endpoint   = args.opcua_endpoint,
+        opcua_namespace  = args.opcua_namespace,
         opcua_users      = opcua_users,
         poll_interval    = args.poll_interval,
         auto_reconnect   = args.auto_reconnect,
