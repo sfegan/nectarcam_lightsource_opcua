@@ -913,32 +913,55 @@ class CalibrationBoxServer:
     # NodeId prefix for all children.
     _DEVICE_NAME = "CalibrationLightSource"
 
-    # (name, initial value, OPC UA variant type)
+    # (name, initial value, OPC UA variant type, description)
     # Each entry becomes a variable node at:
-    #   ns=2;s=CalibrationLightSource.Monitoring.<name>
+    #   ns=2;s=CalibrationLightSource.Monitoring.<n>
     # host, port, dialect are static connection-identity variables written
     # once at startup; the remainder are polled live from the device.
+    # Descriptions sourced from ICD MST-CAM-ICD-0328-LUPM Ed.1 Rev.3 section 3.6.
     _MONITORING_VARS: ClassVar[list[tuple]] = [
-        ("host",               "",      ua.VariantType.String),
-        ("port",               0,       ua.VariantType.Int64),
-        ("dialect",            "",      ua.VariantType.String),
-        ("led_mask",           8191,    ua.VariantType.Int64),
-        ("voltage_set",        10.0,    ua.VariantType.Double),
-        ("voltage_actual",     10.0,    ua.VariantType.Double),
-        ("duration",           0,       ua.VariantType.Int64),
-        ("frequency_dividend", 10000.0, ua.VariantType.Double),
-        ("frequency_divider",  1,       ua.VariantType.Int64),
-        ("width",              1,       ua.VariantType.Int64),
-        ("temperature",        20.0,    ua.VariantType.Double),
-        ("humidity",           50.0,    ua.VariantType.Double),
-        ("faults",             0,       ua.VariantType.Int64),
-        ("light_pulse",        False,   ua.VariantType.Boolean),
-        ("lemo_out",           False,   ua.VariantType.Boolean),
-        ("fiber1_out",         False,   ua.VariantType.Boolean),
-        ("fiber2_out",         False,   ua.VariantType.Boolean),
-        ("lemo_in",            False,   ua.VariantType.Boolean),
-        ("central_current",    0.0,     ua.VariantType.Double),
-        ("cls_state",          0,       ua.VariantType.Int64),
+        ("host",               "",      ua.VariantType.String,
+         "IP address or hostname of the calibration light source device"),
+        ("port",               0,       ua.VariantType.Int64,
+         "TCP port of the calibration light source device (default 50001)"),
+        ("dialect",            "",      ua.VariantType.String,
+         "Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE"),
+        ("led_mask",           8191,    ua.VariantType.Int64,
+         "LED on/off bitmask: bit N = LED N+1 (bits 0-12, 13 LEDs total)"),
+        ("voltage_set",        10.0,    ua.VariantType.Double,
+         "LED supply voltage setpoint in V (range 7.9-16.5 V, controls brightness of LEDs 1-13)"),
+        ("voltage_actual",     10.0,    ua.VariantType.Double,
+         "LED supply voltage measured by the device in V"),
+        ("duration",           0,       ua.VariantType.Int64,
+         "Flash duration after Start in units of 0.1 s (range 0-1023; 0 = infinite until Stop)"),
+        ("frequency_dividend", 10000.0, ua.VariantType.Double,
+         "Flash frequency dividend in Hz (range 244.16-10659.56 Hz with divider=1)"),
+        ("frequency_divider",  1,       ua.VariantType.Int64,
+         "Flash frequency divider ratio (range 1-3000; use > 1 for frequencies below ~300 Hz, minimum 0.1 Hz)"),
+        ("width",              1,       ua.VariantType.Int64,
+         "Trigger output pulse width in units of 62.5 ns (range 1-1000, i.e. 62.5 ns to 62.5 us)"),
+        ("temperature",        20.0,    ua.VariantType.Double,
+         "Internal temperature of the calibration light source in degrees C"),
+        ("humidity",           50.0,    ua.VariantType.Double,
+         "Internal relative humidity in %RH (FF only; LSB = 0.04 %RH; always 50.0 for SPE/AIVFF)"),
+        ("faults",             0,       ua.VariantType.Int64,
+         "Fault flags bitmask: D0=power supply under-voltage (<8 V), D1=over-voltage (>30 V), "
+         "D2=optical transmitter 1 fault, D3=optical transmitter 2 fault"),
+        ("light_pulse",        False,   ua.VariantType.Boolean,
+         "Light pulse flashing active (D0 of control byte; set by Start/Stop commands)"),
+        ("lemo_out",           False,   ua.VariantType.Boolean,
+         "LVDS trigger output active (D1 of control byte)"),
+        ("fiber1_out",         False,   ua.VariantType.Boolean,
+         "Optical transmitter No.1 output active (D2 of control byte)"),
+        ("fiber2_out",         False,   ua.VariantType.Boolean,
+         "Optical transmitter No.2 output active (D3 of control byte)"),
+        ("lemo_in",            False,   ua.VariantType.Boolean,
+         "External LEMO trigger input active (D4 of control byte)"),
+        ("central_current",    0.0,     ua.VariantType.Double,
+         "Centre LED No.7 drive current in mA (range 0-12 mA, LSB = 38.15 nA; SPE only, always 0.0 for FF/AIVFF)"),
+        ("cls_state",          0,       ua.VariantType.Int64,
+         "Server connection state: 0=Offline (not connected to device), "
+         "1=Disabled (connected, light pulse off), 2=Enabled (connected, light pulse on)"),
     ]
 
     def __init__(
@@ -1020,11 +1043,16 @@ class CalibrationBoxServer:
         mon_node_id = ua.NodeId(f"{self._DEVICE_NAME}.Monitoring", ns)
         monitoring  = await device.add_object(
             mon_node_id, ua.QualifiedName("Monitoring", ns))
-        for name, default, vtype in self._MONITORING_VARS:
+        for name, default, vtype, description in self._MONITORING_VARS:
             node_id = ua.NodeId(f"{self._DEVICE_NAME}.Monitoring.{name}", ns)
             var = await monitoring.add_variable(
                 node_id, ua.QualifiedName(name, ns),
                 ua.Variant(default, vtype),
+            )
+            await var.write_attribute(
+                ua.AttributeIds.Description,
+                ua.DataValue(ua.Variant(ua.LocalizedText(description),
+                                        ua.VariantType.LocalizedText)),
             )
             await var.set_read_only()
             self._vars[name] = var
