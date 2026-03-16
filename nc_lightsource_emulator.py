@@ -101,9 +101,16 @@ class DeviceState:
         self.product_id          = 1
         self.connected           = False
 
+        # Internal timers / background tasks (not part of protocol state)
+        self._duration_timer: Optional[threading.Timer] = None
+        self._voltage_ramp_thread: Optional[threading.Thread] = None
+        self._voltage_ramp_stop  = threading.Event()
+        self._start_voltage_ramp()
+
     # ----------------------------------------------------------
     def reset(self):
         """Restore all configurable parameters to their power-on defaults."""
+        self._cancel_duration_timer()
         with self._lock:
             self.led_mask            = 8191
             self.voltage_set         = 9.98
@@ -134,6 +141,76 @@ class DeviceState:
         with self._lock:
             return {k: v for k, v in self.__dict__.items()
                     if not k.startswith("_")}
+
+    # ----------------------------------------------------------
+    # Duration timer
+    # ----------------------------------------------------------
+    def arm_duration_timer(self):
+        """
+        If duration > 0, schedule an automatic Stop after
+        duration * 0.1 seconds (per ICD: range × 0.1 s).
+        Cancels any previously armed timer first.
+        """
+        self._cancel_duration_timer()
+        with self._lock:
+            d = self.duration
+        if d <= 0:
+            log.debug("Duration is 0 — light source runs indefinitely.")
+            return
+        delay = d * 0.1
+        log.info("Duration timer armed: %.1f s (duration=%d)", delay, d)
+        self._duration_timer = threading.Timer(delay, self._duration_expired)
+        self._duration_timer.daemon = True
+        self._duration_timer.start()
+
+    def _cancel_duration_timer(self):
+        if self._duration_timer is not None:
+            self._duration_timer.cancel()
+            self._duration_timer = None
+            log.debug("Duration timer cancelled.")
+
+    def _duration_expired(self):
+        log.info("Duration expired — switching light source OFF.")
+        with self._lock:
+            self.enabled = False
+        self._duration_timer = None
+
+    # ----------------------------------------------------------
+    # Voltage ramp  (1 V/s background thread)
+    # ----------------------------------------------------------
+    _RAMP_RATE     = 1.0   # V per second
+    _RAMP_INTERVAL = 0.05  # update interval in seconds
+
+    def _start_voltage_ramp(self):
+        self._voltage_ramp_stop.clear()
+        self._voltage_ramp_thread = threading.Thread(
+            target=self._voltage_ramp_loop,
+            name="voltage-ramp",
+            daemon=True,
+        )
+        self._voltage_ramp_thread.start()
+
+    def _voltage_ramp_loop(self):
+        step = self._RAMP_RATE * self._RAMP_INTERVAL   # V per tick
+        while not self._voltage_ramp_stop.is_set():
+            with self._lock:
+                target  = self.voltage_set
+                current = self.voltage_actual
+                diff    = target - current
+                if abs(diff) <= step:
+                    if current != target:
+                        self.voltage_actual = target
+                        log.debug("Voltage ramp complete: %.3f V", target)
+                else:
+                    self.voltage_actual = current + math.copysign(step, diff)
+                    log.debug("Voltage ramping: actual=%.3f → set=%.3f",
+                              self.voltage_actual, target)
+            time.sleep(self._RAMP_INTERVAL)
+
+    def stop_background_tasks(self):
+        """Call on shutdown to clean up the ramp thread and any pending timers."""
+        self._cancel_duration_timer()
+        self._voltage_ramp_stop.set()
 
 
 # ==========================================================
@@ -577,11 +654,13 @@ class TcpEmulator:
         if cmd == Cmd.START:
             log.info("CMD: Start")
             self.state.update(enabled=True)
+            self.state.arm_duration_timer()
             time.sleep(0.1)
             self._send_status(conn)
 
         elif cmd == Cmd.STOP:
             log.info("CMD: Stop")
+            self.state._cancel_duration_timer()
             self.state.update(enabled=False)
             time.sleep(0.1)
             self._send_status(conn)
@@ -740,6 +819,7 @@ def main():
         run_cli(state, stop_event)
     finally:
         log.info("Stopping emulator …")
+        state.stop_background_tasks()
         emulator.stop()
         tcp_thread.join(timeout=2)
         log.info("Done.")
