@@ -923,7 +923,7 @@ class CalibrationBoxServer:
         ("host",               "",      ua.VariantType.String,
          "IP address or hostname of the calibration light source device"),
         ("port",               0,       ua.VariantType.Int64,
-         "TCP port of the calibration light source device (default 50001)"),
+         "TCP port of the calibration light source device (port 50001 is fixed by the device firmware)"),
         ("dialect",            "",      ua.VariantType.String,
          "Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE"),
         ("led_mask",           8191,    ua.VariantType.Int64,
