@@ -53,7 +53,9 @@ import asyncio
 import dataclasses
 import functools
 import logging
+import signal
 import socket
+import sys
 import time
 from abc import ABC, abstractmethod
 from enum import IntEnum
@@ -66,10 +68,11 @@ from asyncua.server.user_managers import UserManager, User, UserRole
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# Emit to stderr only, without timestamps: journald/systemd adds its own.
+# When running interactively the format is still readable.
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 log = logging.getLogger("cta.nectarcam.cls.server")
 
 
@@ -1278,18 +1281,24 @@ class CalibrationBoxServer:
         async with self.server:
             log.info("OPC UA server started: %s", self.server.endpoint)
             poll_task = asyncio.create_task(self._poll_loop())
-            log.info("Polling task started.  Press Ctrl-C to stop.")
+
+            # Resolve on SIGTERM (systemd stop) or SIGINT (Ctrl-C)
+            loop     = asyncio.get_running_loop()
+            shutdown = loop.create_future()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, shutdown.set_result, sig)
+
+            log.info("Polling task started.  Waiting for SIGTERM or SIGINT.")
             try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                pass
+                sig = await shutdown
+                log.info("Received %s, shutting down.", sig.name)
             finally:
                 poll_task.cancel()
                 try:
                     await poll_task
                 except asyncio.CancelledError:
                     pass
-                log.info("Shutting down.")
+                log.info("Shutdown complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -1314,14 +1323,15 @@ def _parse_args():
     return p.parse_args()
 
 
-async def _main():
+async def _main() -> int:
     args = _parse_args()
     logging.getLogger().setLevel(args.log_level)
 
     opcua_users = {}
     for pair in args.opcua_user or []:
         if ":" not in pair:
-            raise SystemExit(f"Invalid --opcua-user (expected USER:PASS): {pair!r}")
+            log.error("Invalid --opcua-user (expected USER:PASS): %r", pair)
+            return 1
         user, _, pw = pair.partition(":")
         opcua_users[user] = pw
 
@@ -1338,9 +1348,11 @@ async def _main():
     )
     try:
         await srv.start()
-    except KeyboardInterrupt:
-        log.info("Interrupted.")
+    except Exception as exc:
+        log.critical("Fatal error: %s", exc, exc_info=True)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(_main())
+    sys.exit(asyncio.run(_main()))
