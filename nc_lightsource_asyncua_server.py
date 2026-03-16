@@ -995,7 +995,10 @@ class CalibrationBoxServer:
         return srv
 
     async def _init_server(self):
-        await self.server.init()
+        # shelf_file=None disables asyncua's address-space persistence cache.
+        # Without this, nodes added in a previous run are restored from
+        # server_nodes.xml and re-adding them raises BadNodeIdExists.
+        await self.server.init(shelf_file=None)
         ns     = await self.server.register_namespace(
             "http://nectarcam.calibrationlightsource")
         device = await self.server.nodes.objects.add_object(
@@ -1048,14 +1051,68 @@ class CalibrationBoxServer:
     # OPC UA methods
     # ----------------------------------------------------------------
 
+    # Argument descriptions sourced from ICD MST-CAM-ICD-0328-LUPM Ed.1 Rev.3
+    # section 3.6 (Characters details).  Keyed by argument name so each
+    # description is written once and shared between individual Set* methods
+    # and the bulk Configure method.
+    _ARG_DESCRIPTIONS: ClassVar[dict[str, str]] = {
+        "led_mask":
+            "LED on/off bitmask: bit N = LED N+1 (bits 0–12, 13 LEDs)",
+        "voltage_set":
+            "LED supply voltage in V (range 7.9–16.5 V, sets brightness of LEDs 1–13)",
+        "voltage":
+            "LED supply voltage in V (range 7.9–16.5 V, sets brightness of LEDs 1–13)",
+        "duration":
+            "Flash duration after Start in units of 0.1 s (range 0–1023; 0 = infinite, stop with Stop command)",
+        "current_mA":
+            "Centre LED No.7 drive current in mA (range 0–12 mA, LSB = 38.15 nA; SPE only, ignored for FF/AIVFF)",
+        "central_current":
+            "Centre LED No.7 drive current in mA (range 0–12 mA, LSB = 38.15 nA; SPE only, ignored for FF/AIVFF)",
+        "width":
+            "Trigger output pulse width in units of 62.5 ns (range 1–1000, i.e. 62.5 ns–62.5 µs; hardware power-on default is 4 = 250 ns)",
+        "dividend":
+            "Flash frequency dividend in Hz (range 244.16–10659.56 Hz with divider=1; sets 1/period of internal timer)",
+        "frequency_dividend":
+            "Flash frequency dividend in Hz (range 244.16–10659.56 Hz with divider=1; sets 1/period of internal timer)",
+        "divider":
+            "Flash frequency divider ratio (range 1–3000; use values > 1 for frequencies below ~300 Hz, minimum 0.1 Hz)",
+        "frequency_divider":
+            "Flash frequency divider ratio (range 1–3000; use values > 1 for frequencies below ~300 Hz, minimum 0.1 Hz)",
+        "light_pulse":
+            "Light pulse flashing On/Off (D0 of control byte; equivalent to Start/Stop)",
+        "lemo_out":
+            "LVDS trigger output On/Off (D1 of control byte)",
+        "fiber1_out":
+            "Optical transmitter No.1 output On/Off (D2 of control byte)",
+        "fiber2_out":
+            "Optical transmitter No.2 output On/Off (D3 of control byte)",
+        "lemo_in":
+            "External LEMO trigger input On/Off (D4 of control byte)",
+    }
+
+    @classmethod
+    def _arg(cls, name: str, variant_type: ua.VariantType) -> ua.Argument:
+        """Build a named, typed OPC UA method input argument descriptor.
+        Description is looked up from _ARG_DESCRIPTIONS by name."""
+        arg = ua.Argument()
+        arg.Name             = name
+        arg.DataType         = ua.NodeId(int(variant_type))
+        arg.ValueRank        = -1
+        arg.ArrayDimensions  = []
+        arg.Description      = ua.LocalizedText(
+            cls._ARG_DESCRIPTIONS.get(name, name))
+        return arg
+
     async def _build_methods(self, ns: int, device):
         def node_id(name):
             return ua.NodeId(f"{self._DEVICE_NAME}.{name}", ns)
 
-        async def add(name, cb, in_types=()):
+        a = self._arg  # shorthand
+
+        async def add(name, cb, in_args=()):
             await device.add_method(
                 node_id(name), ua.QualifiedName(name, ns),
-                cb, list(in_types), [],
+                cb, list(in_args), [],
             )
 
         await add("Start",     self._m_start)
@@ -1064,35 +1121,41 @@ class CalibrationBoxServer:
         await add("Reconnect", self._m_reconnect)
         await add("GetStatus", self._m_get_status)
 
-        await add("SetLeds",     self._m_set_leds,     [ua.VariantType.Int32])
-        await add("SetVoltage",  self._m_set_voltage,  [ua.VariantType.Float])
-        await add("SetDuration", self._m_set_duration, [ua.VariantType.Int32])
-        await add("SetCurrent",  self._m_set_current,  [ua.VariantType.Float])
-        await add("SetWidth",    self._m_set_width,    [ua.VariantType.Int32])
+        await add("SetLeds",     self._m_set_leds,
+                  [a("led_mask",  ua.VariantType.Int32)])
+        await add("SetVoltage",  self._m_set_voltage,
+                  [a("voltage",   ua.VariantType.Float)])
+        await add("SetDuration", self._m_set_duration,
+                  [a("duration",  ua.VariantType.Int32)])
+        await add("SetCurrent",  self._m_set_current,
+                  [a("current_mA", ua.VariantType.Float)])
+        await add("SetWidth",    self._m_set_width,
+                  [a("width",     ua.VariantType.Int32)])
 
         await add("SetFrequency", self._m_set_frequency,
-                  [ua.VariantType.Float, ua.VariantType.Int32])
+                  [a("dividend",  ua.VariantType.Float),
+                   a("divider",   ua.VariantType.Int32)])
 
         await add("SetControl", self._m_set_control,
-                  [ua.VariantType.Boolean,   # lemo_out
-                   ua.VariantType.Boolean,   # fiber1_out
-                   ua.VariantType.Boolean,   # fiber2_out
-                   ua.VariantType.Boolean,   # lemo_in (external trigger)
-                   ua.VariantType.Boolean])  # light_pulse enabled
+                  [a("lemo_out",    ua.VariantType.Boolean),
+                   a("fiber1_out",  ua.VariantType.Boolean),
+                   a("fiber2_out",  ua.VariantType.Boolean),
+                   a("lemo_in",     ua.VariantType.Boolean),
+                   a("light_pulse", ua.VariantType.Boolean)])
 
         await add("Configure", self._m_configure,
-                  [ua.VariantType.Int32,     # led_mask
-                   ua.VariantType.Float,     # voltage_set
-                   ua.VariantType.Int32,     # duration
-                   ua.VariantType.Float,     # frequency_dividend
-                   ua.VariantType.Int32,     # frequency_divider
-                   ua.VariantType.Int32,     # width
-                   ua.VariantType.Boolean,   # light_pulse enabled
-                   ua.VariantType.Boolean,   # lemo_out
-                   ua.VariantType.Boolean,   # fiber1_out
-                   ua.VariantType.Boolean,   # fiber2_out
-                   ua.VariantType.Boolean,   # lemo_in
-                   ua.VariantType.Float])    # central_current (SPE only)
+                  [a("led_mask",           ua.VariantType.Int32),
+                   a("voltage_set",        ua.VariantType.Float),
+                   a("duration",           ua.VariantType.Int32),
+                   a("frequency_dividend", ua.VariantType.Float),
+                   a("frequency_divider",  ua.VariantType.Int32),
+                   a("width",              ua.VariantType.Int32),
+                   a("light_pulse",        ua.VariantType.Boolean),
+                   a("lemo_out",           ua.VariantType.Boolean),
+                   a("fiber1_out",         ua.VariantType.Boolean),
+                   a("fiber2_out",         ua.VariantType.Boolean),
+                   a("lemo_in",            ua.VariantType.Boolean),
+                   a("central_current",    ua.VariantType.Float)])
 
     # ----------------------------------------------------------------
     # Dispatch helper and post-command status refresh
