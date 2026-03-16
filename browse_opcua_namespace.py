@@ -130,6 +130,12 @@ async def browse(node, prefix="", ns_filter=None, show_values=True):
         if node_class == ua.NodeClass.Variable and show_values:
             value = await _read_value(child)
             print(f"{prefix}{branch}{BOLD(bn.Name)}{id_tag}  {nc_tag}  {ns_tag}  = {value}")
+            try:
+                desc = (await child.read_description()).Text
+                if desc:
+                    print(f"{prefix}{cont}    {DIM(desc)}")
+            except Exception:
+                pass
 
         elif node_class == ua.NodeClass.Method:
             in_args, out_args = await _read_method_args(child)
