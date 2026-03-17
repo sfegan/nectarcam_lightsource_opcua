@@ -133,7 +133,7 @@ async def browse(node, prefix="", ns_filter=None, show_values=True):
             try:
                 desc = (await child.read_description()).Text
                 if desc:
-                    print(f"{prefix}{cont}    {DIM(desc)}")
+                    print(f"{prefix}{cont}{DIM(desc)}")
             except Exception:
                 pass
 
@@ -142,11 +142,17 @@ async def browse(node, prefix="", ns_filter=None, show_values=True):
             in_str  = ", ".join(in_args)  or "—"
             out_str = ", ".join(out_args) or "—"
             print(f"{prefix}{branch}{BOLD(bn.Name)}{id_tag}  {nc_tag}  {ns_tag}")
-            print(f"{prefix}{cont}    in:  {in_str}")
-            print(f"{prefix}{cont}    out: {out_str}")
+            print(f"{prefix}{cont}in:  {in_str}")
+            print(f"{prefix}{cont}out: {out_str}")
 
         else:
             print(f"{prefix}{branch}{BOLD(bn.Name)}{id_tag}  {nc_tag}  {ns_tag}")
+            try:
+                desc = (await child.read_description()).Text
+                if desc:
+                    print(f"{prefix}{cont}{DIM(desc)}")
+            except Exception:
+                pass
 
         # Recurse (skip built-in type nodes to avoid noise)
         if node_id.NamespaceIndex != 0:
