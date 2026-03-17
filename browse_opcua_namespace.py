@@ -67,16 +67,41 @@ def _type_name(identifier):
 
 
 async def _read_value(node):
-    """Return a short string representation of a variable's current value."""
+    """Return a string showing type, status and value of a variable node."""
+    # Attempt to read the data type label independently — it may succeed even
+    # when the value itself is unreadable.
     try:
-        val  = await node.read_value()
         vtype = await node.read_data_type()
         tname = _type_name(vtype.Identifier)
-        s = repr(val)
-        # Don't truncate — show full value; long lists will wrap naturally
-        return f"{DIM(tname)}  {s}"
+    except Exception:
+        tname = "?"
+
+    try:
+        dv = await node.read_data_value()   # DataValue includes status code
+
+        # Check status code — Good=0x00000000, Uncertain=0x40000000, Bad=0x80000000
+        sc       = dv.StatusCode
+        severity = sc.value & 0xC0000000
+
+        if severity == 0x80000000:
+            # Bad quality — value is not usable; show status name only
+            return f"{DIM(tname)}  {RED(f'[Bad: {sc.name}]')}"
+        elif severity == 0x40000000:
+            # Uncertain — value may be stale or estimated; flag it clearly
+            s = repr(dv.Value.Value) if dv.Value is not None else "None"
+            return f"{DIM(tname)}  {YELLOW(f'[Uncertain: {sc.name}]')}  {s}"
+        else:
+            # Good
+            s = repr(dv.Value.Value) if dv.Value is not None else "None"
+            return f"{DIM(tname)}  {s}"
+
+    except ua.UaStatusCodeError as exc:
+        # Server explicitly rejected the read (e.g. BadNotReadable,
+        # BadAttributeIdInvalid) — show the status code name cleanly
+        name = getattr(exc.code, "name", str(exc))
+        return f"{DIM(tname)}  {RED(f'[{name}]')}"
     except Exception as exc:
-        return RED(f"<read error: {exc}>")
+        return f"{DIM(tname)}  {RED(f'<error: {exc}>')}"
 
 
 async def _read_method_args(node):
