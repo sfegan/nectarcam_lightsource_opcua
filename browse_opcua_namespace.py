@@ -76,30 +76,31 @@ async def _read_value(node):
     except Exception:
         tname = "?"
 
-    try:
-        dv = await node.read_data_value()   # DataValue includes status code
+    def _short(code_int):
+        """Extract short name from a status code integer."""
+        sc = ua.StatusCode(code_int)
+        n  = sc.name
+        if "(" in n and n.endswith(")"):
+            n = n[n.rfind("(") + 1:-1]
+        return n, sc.value & 0xC0000000
 
-        # Check status code — Good=0x00000000, Uncertain=0x40000000, Bad=0x80000000
+    try:
+        # raise_on_bad_status=False ensures non-Good status codes are always
+        # returned in the DataValue rather than raised as exceptions
+        dv       = await node.read_data_value(raise_on_bad_status=False)
         sc       = dv.StatusCode
         severity = sc.value & 0xC0000000
+        name     = _short(sc.value)[0]
 
         if severity == 0x80000000:
-            # Bad quality — value is not usable; show status name only
-            return f"{DIM(tname)}  {RED(f'[Bad: {sc.name}]')}"
+            return f"{DIM(tname)}  {RED(f'[{name}]')}"
         elif severity == 0x40000000:
-            # Uncertain — value may be stale or estimated; flag it clearly
             s = repr(dv.Value.Value) if dv.Value is not None else "None"
-            return f"{DIM(tname)}  {YELLOW(f'[Uncertain: {sc.name}]')}  {s}"
+            return f"{DIM(tname)}  {YELLOW(f'[{name}]')}  {s}"
         else:
-            # Good
             s = repr(dv.Value.Value) if dv.Value is not None else "None"
             return f"{DIM(tname)}  {s}"
 
-    except ua.UaStatusCodeError as exc:
-        # Server explicitly rejected the read (e.g. BadNotReadable,
-        # BadAttributeIdInvalid) — show the status code name cleanly
-        name = getattr(exc.code, "name", str(exc))
-        return f"{DIM(tname)}  {RED(f'[{name}]')}"
     except Exception as exc:
         return f"{DIM(tname)}  {RED(f'<error: {exc}>')}"
 
