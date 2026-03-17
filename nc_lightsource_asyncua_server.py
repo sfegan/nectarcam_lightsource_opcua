@@ -68,12 +68,34 @@ from asyncua.server.user_managers import UserManager, User, UserRole
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-# Emit to stderr only, without timestamps: journald/systemd adds its own.
-# When running interactively the format is still readable.
-_handler = logging.StreamHandler()
-_handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[_handler])
+# Logging is configured at startup in _main() once CLI arguments are parsed,
+# so --log-file and --log-level can both take effect before any log output.
+# A module-level logger is defined here for use at import time if needed.
 log = logging.getLogger("cta.nectarcam.cls.server")
+
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+
+def _configure_logging(level: str, log_file: str | None) -> None:
+    """Configure the root logger.
+
+    Always emits to stdout (preferred for Docker / container log drivers).
+    If --log-file is given, messages are also written to that file.
+    Timestamps are always included so the output is self-contained whether
+    running under Docker, systemd, or interactively.
+    """
+    formatter = logging.Formatter(_LOG_FORMAT)
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+
+    handlers = [stdout_handler]
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        handlers.append(file_handler)
+
+    logging.basicConfig(level=level, handlers=handlers, force=True)
 
 
 class _SuppressUaStatusCodeTracebacks(logging.Filter):
@@ -1420,6 +1442,9 @@ def _parse_args():
     p.add_argument("--opcua-user",       action="append", metavar="USER:PASS")
     p.add_argument("--log-level",        default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    p.add_argument("--log-file",         default=None, metavar="PATH",
+                   help="Write log output to this file in addition to stdout "
+                        "(stdout is always used so container log drivers capture it)")
     p.add_argument("--poll-interval",    type=float, default=1.0, metavar="SECONDS")
     p.add_argument("--auto-reconnect",   action="store_true")
     p.add_argument("--min-cmd-interval", type=float, default=0.0, metavar="SECONDS")
@@ -1428,7 +1453,7 @@ def _parse_args():
 
 async def _main() -> int:
     args = _parse_args()
-    logging.getLogger().setLevel(args.log_level)
+    _configure_logging(args.log_level, args.log_file)
 
     opcua_users = {}
     for pair in args.opcua_user or []:
