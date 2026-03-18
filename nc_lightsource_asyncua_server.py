@@ -918,22 +918,23 @@ class CalibrationBoxServer:
     OPC UA server that wraps CalBoxConnection and exposes the full
     NectarCAM calibration light source interface.
 
-    Node hierarchy (namespace "http://nectarcam.calibrationlightsource"):
+    Node hierarchy (example with default paths):
         Objects/
-          CalibrationLightSource/
-            Monitoring/   -- read-only polled variables
-            Methods:      Start, Stop, Reboot, Reconnect, GetStatus,
-                          SetLeds, SetVoltage, SetDuration, SetFrequency,
-                          SetCurrent, SetWidth, SetControl, Configure
+          CalibrationLightSource/        (--opcua-root)
+            Monitoring/                  (--monitoring-path)
+              temperature, humidity, ...
+            Start, Stop, GetStatus, ...  (methods)
 
-    NodeId convention: ns=2;s=CalibrationLightSource.<n>
-      e.g.  ns=2;s=CalibrationLightSource.GetStatus
-            ns=2;s=CalibrationLightSource.Monitoring.temperature
+    Multi-level roots are supported, e.g. --opcua-root Camera.CalibrationLightSource
+    creates Objects/Camera/CalibrationLightSource/...
+
+    NodeId convention: ns=2;s=<root>.<monitoring-path>.<var>
+      e.g. (defaults) ns=2;s=CalibrationLightSource.Monitoring.temperature
+                      ns=2;s=CalibrationLightSource.GetStatus
     """
 
-    # Root browse name – used both as the OPC UA object name and as the
-    # NodeId prefix for all children.
-    _DEVICE_NAME = "CalibrationLightSource"
+    _DEFAULT_ROOT            = "CalibrationLightSource"
+    _DEFAULT_MONITORING_PATH = "Monitoring"
 
     # (name, initial value, OPC UA variant type, description)
     # Each entry becomes a variable node at:
@@ -994,6 +995,8 @@ class CalibrationBoxServer:
         product:          str   = "FF",
         opcua_endpoint:   str   = "opc.tcp://0.0.0.0:4840/nectarcam/",
         opcua_namespace:  str   = None,
+        opcua_root:       str   = None,
+        monitoring_path:  str   = None,
         opcua_users:      dict  = None,
         poll_interval:    float = 1.0,
         auto_reconnect:   bool  = False,
@@ -1007,6 +1010,11 @@ class CalibrationBoxServer:
         self.opcua_namespace  = (opcua_namespace or
             f"http://cta-observatory.org/nectarcam/calibrationlightsource"
             f"/{product.lower()}")
+        # Root path may be multi-level (e.g. "Camera.CalibrationLightSource").
+        # Each dot-separated component becomes one browse level in Objects/.
+        self.opcua_root       = opcua_root or self._DEFAULT_ROOT
+        # Path of the monitoring object relative to the leaf root node.
+        self.monitoring_path  = monitoring_path or self._DEFAULT_MONITORING_PATH
 
         self.connection = CalBoxConnection(
             host=host, port=port,
@@ -1051,11 +1059,31 @@ class CalibrationBoxServer:
         # server_nodes.xml and re-adding them raises BadNodeIdExists.
         await self.server.init(shelf_file=None)
         log.info("OPC UA namespace: %s", self.opcua_namespace)
-        ns     = await self.server.register_namespace(self.opcua_namespace)
-        device = await self.server.nodes.objects.add_object(
-            ua.NodeId(self._DEVICE_NAME, ns),
-            ua.QualifiedName(self._DEVICE_NAME, ns),
-        )
+        log.info("OPC UA root: %s  monitoring: %s",
+                 self.opcua_root, self.monitoring_path)
+        ns = await self.server.register_namespace(self.opcua_namespace)
+
+        # Build the root object, creating one node per path component so that
+        # multi-level roots like "Camera.CalibrationLightSource" produce a
+        # proper browse hierarchy: Objects/Camera/CalibrationLightSource/...
+        # The NodeId of each intermediate node uses the dotted prefix up to
+        # that component, matching the convention used for children.
+        components = self.opcua_root.split(".")
+        node_id_prefix = ""
+        parent = self.server.nodes.objects
+        for component in components:
+            node_id_prefix = f"{node_id_prefix}.{component}" if node_id_prefix else component
+            parent = await parent.add_object(
+                ua.NodeId(node_id_prefix, ns),
+                ua.QualifiedName(component, ns),
+            )
+        device = parent
+
+        # The leaf root node is the device node; methods hang directly off it.
+        # The NodeId prefix for all children is the full root path.
+        self._node_id_prefix     = self.opcua_root
+        self._monitoring_node_id = f"{self.opcua_root}.{self.monitoring_path}"
+
         await self._build_monitoring(ns, device)
         await self._build_methods(ns, device)
         # Write static connection-identity variables once at startup
@@ -1068,11 +1096,11 @@ class CalibrationBoxServer:
     # ----------------------------------------------------------------
 
     async def _build_monitoring(self, ns: int, device):
-        mon_node_id = ua.NodeId(f"{self._DEVICE_NAME}.Monitoring", ns)
+        mon_node_id = ua.NodeId(self._monitoring_node_id, ns)
         monitoring  = await device.add_object(
-            mon_node_id, ua.QualifiedName("Monitoring", ns))
+            mon_node_id, ua.QualifiedName(self.monitoring_path, ns))
         for name, default, vtype, description in self._MONITORING_VARS:
-            node_id = ua.NodeId(f"{self._DEVICE_NAME}.Monitoring.{name}", ns)
+            node_id = ua.NodeId(f"{self._monitoring_node_id}.{name}", ns)
             var = await monitoring.add_variable(
                 node_id, ua.QualifiedName(name, ns),
                 ua.Variant(default, vtype),
@@ -1161,7 +1189,7 @@ class CalibrationBoxServer:
 
     async def _build_methods(self, ns: int, device):
         def node_id(name):
-            return ua.NodeId(f"{self._DEVICE_NAME}.{name}", ns)
+            return ua.NodeId(f"{self._node_id_prefix}.{name}", ns)
 
         a = self._arg  # shorthand
 
@@ -1439,6 +1467,16 @@ def _parse_args():
                         "http://cta-observatory.org/nectarcam/calibrationlightsource/<product>). "
                         "Include telescope number for multi-telescope deployments, e.g. "
                         "http://cta-observatory.org/nectarcam/1/calibrationlightsource/FF")
+    p.add_argument("--opcua-root",       default=None,
+                   metavar="PATH",
+                   help="Root object path in the OPC UA address space "
+                        "(default: CalibrationLightSource). "
+                        "Dot-separated components create nested browse levels, e.g. "
+                        "Camera.CalibrationLightSource creates Objects/Camera/CalibrationLightSource/")
+    p.add_argument("--monitoring-path",  default=None,
+                   metavar="NAME",
+                   help="Name of the monitoring object node under the root "
+                        "(default: Monitoring)")
     p.add_argument("--opcua-user",       action="append", metavar="USER:PASS")
     p.add_argument("--log-level",        default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -1470,6 +1508,8 @@ async def _main() -> int:
         product          = args.product,
         opcua_endpoint   = args.opcua_endpoint,
         opcua_namespace  = args.opcua_namespace,
+        opcua_root       = args.opcua_root,
+        monitoring_path  = args.monitoring_path,
         opcua_users      = opcua_users,
         poll_interval    = args.poll_interval,
         auto_reconnect   = args.auto_reconnect,
