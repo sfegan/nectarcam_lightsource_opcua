@@ -1002,11 +1002,11 @@ class CalibBoxGUI(tk.Tk):
                     self._info_state_var.set(label)
                 if hasattr(self, "_state_label"):
                     self._state_label.config(fg=col)
-            elif n == "host" and self._info_host_var:
+            elif n == "device_host" and self._info_host_var:
                 self._info_host_var.set(str(value))
-            elif n == "port" and self._info_port_var:
+            elif n == "device_port" and self._info_port_var:
                 self._info_port_var.set(str(value))
-            elif n == "dialect" and self._info_dialect_var:
+            elif n == "device_dialect" and self._info_dialect_var:
                 self._info_dialect_var.set(str(value))
         except Exception:
             pass

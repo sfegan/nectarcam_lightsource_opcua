@@ -961,25 +961,25 @@ class CalibrationBoxServer:
     # once at startup; the remainder are polled live from the device.
     # Descriptions sourced from ICD MST-CAM-ICD-0328-LUPM Ed.1 Rev.3 section 3.6.
     _MONITORING_VARS: ClassVar[list[tuple]] = [
-        ("host",               "",      ua.VariantType.String,
+        ("device_host",        "",      ua.VariantType.String,
          "IP address or hostname of the calibration light source device"),
-        ("port",               0,       ua.VariantType.Int64,
+        ("device_port",        0,       ua.VariantType.UInt32,
          "TCP port of the calibration light source device (port 50001 is fixed by the device firmware)"),
-        ("dialect",            "",      ua.VariantType.String,
+        ("device_dialect",     "",      ua.VariantType.String,
          "Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE"),
-        ("led_mask",           8191,    ua.VariantType.Int64,
+        ("led_mask",           8191,    ua.VariantType.UInt64,
          "LED on/off bitmask: bit N = LED N+1 (bits 0-12, 13 LEDs total)"),
         ("voltage_set",        10.0,    ua.VariantType.Double,
          "LED supply voltage setpoint in V (range 7.9-16.5 V, controls brightness of LEDs 1-13)"),
         ("voltage_actual",     10.0,    ua.VariantType.Double,
          "LED supply voltage measured by the device in V"),
-        ("duration",           0,       ua.VariantType.Int64,
+        ("duration",           0,       ua.VariantType.Int32,
          "Flash duration after Start in units of 0.1 s (range 0-1023; 0 = infinite until Stop)"),
         ("frequency_dividend", 10000.0, ua.VariantType.Double,
          "Flash frequency dividend in Hz (range 244.16-10659.56 Hz with divider=1)"),
-        ("frequency_divider",  1,       ua.VariantType.Int64,
+        ("frequency_divider",  1,       ua.VariantType.Int32,
          "Flash frequency divider ratio (range 1-3000; use > 1 for frequencies below ~300 Hz, minimum 0.1 Hz)"),
-        ("width",              1,       ua.VariantType.Int64,
+        ("width",              1,       ua.VariantType.Int32,
          "Trigger output pulse width in units of 62.5 ns (range 1-1000, i.e. 62.5 ns to 62.5 us)"),
         ("temperature",        20.0,    ua.VariantType.Double,
          "Internal temperature of the calibration light source in degrees C"),
@@ -1105,9 +1105,9 @@ class CalibrationBoxServer:
         await self._build_monitoring(ns, device)
         await self._build_methods(ns, device)
         # Write static connection-identity variables once at startup
-        await self._set_var("host",    self.connection.host)
-        await self._set_var("port",    self.connection.port)
-        await self._set_var("dialect", self.connection.dialect.NAME)
+        await self._set_var("device_host",    self.connection.host)
+        await self._set_var("device_port",    self.connection.port)
+        await self._set_var("device_dialect", self.connection.dialect.NAME)
 
     # ----------------------------------------------------------------
     # Monitoring nodes
@@ -1129,14 +1129,16 @@ class CalibrationBoxServer:
                                         ua.VariantType.LocalizedText)),
             )
             await var.set_read_only()
-            self._vars[name] = var
+            self._vars[name] = (var, vtype)
 
     async def _set_var(self, name: str, value):
-        node = self._vars.get(name)
-        if node is None:
+        entry = self._vars.get(name)
+        if entry is None:
             return
+
+        node, vtype = entry
         try:
-            await node.write_value(ua.Variant(value))
+            await node.write_value(ua.Variant(value, vtype))
         except Exception as exc:
             log.error("Failed to update OPC UA variable %s: %s", name, exc)
 
