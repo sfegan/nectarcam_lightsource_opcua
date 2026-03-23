@@ -172,7 +172,7 @@ HELP = """
 ║              duration, frequency_dividend, frequency_divider,║
 ║              width, temperature, humidity, faults,           ║
 ║              light_pulse, lemo_out, fiber1_out, fiber2_out,  ║
-║              lemo_in, central_current, cls_state             ║
+║              lemo_in, central_current, device_state          ║
 ║    readall                  Read all monitoring variables    ║
 ║    monitor                  Subscribe to all changes (live)  ║
 ║    unmonitor                Cancel subscription              ║

@@ -1000,7 +1000,7 @@ class CalibrationBoxServer:
          "External LEMO trigger input active (D4 of control byte)"),
         ("central_current",    0.0,     ua.VariantType.Double,
          "Centre LED No.7 drive current in mA (range 0-12 mA, LSB = 38.15 nA; SPE only, always 0.0 for FF/AIVFF)"),
-        ("cls_state",          0,       ua.VariantType.Int64,
+        ("device_state",          0,    ua.VariantType.Int32,
          "Server connection state: 0=Offline (not connected to device), "
          "1=Disabled (connected, light pulse off), 2=Enabled (connected, light pulse on)"),
     ]
@@ -1144,10 +1144,10 @@ class CalibrationBoxServer:
         """Push all BoxState fields into OPC UA monitoring nodes."""
         d = state.as_dict()
         for name in self._vars:
-            if name != "cls_state" and name in d:
+            if name != "device_state" and name in d:
                 await self._set_var(name, d[name])
         self.device_state = state.device_state
-        await self._set_var("cls_state", int(self.device_state))
+        await self._set_var("device_state", int(self.device_state))
 
     # ----------------------------------------------------------------
     # OPC UA methods
@@ -1305,12 +1305,12 @@ class CalibrationBoxServer:
             log.info("Reconnected to %s device %s:%d.",
                      self.connection.dialect.NAME, self.connection.host, self.connection.port)
             self.device_state = DeviceState.Disabled
-            await self._set_var("cls_state", int(self.device_state))
+            await self._set_var("device_state", int(self.device_state))
             await self._apply_state(await self.connection.get_status())
             return []
         log.warning("Reconnect failed -- device still offline.")
         self.device_state = DeviceState.Offline
-        await self._set_var("cls_state", int(self.device_state))
+        await self._set_var("device_state", int(self.device_state))
         raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
 
     @_unwrap_variants
@@ -1408,7 +1408,7 @@ class CalibrationBoxServer:
                 if self.device_state != DeviceState.Offline:
                     log.error("Poll failed, marking Offline: %s", exc)
                     self.device_state = DeviceState.Offline
-                    await self._set_var("cls_state", int(self.device_state))
+                    await self._set_var("device_state", int(self.device_state))
                     await self.connection.close()
                 elif self.auto_reconnect:
                     now = time.monotonic()
@@ -1484,7 +1484,7 @@ class CalibrationBoxServer:
                 " Auto-reconnect enabled." if self.auto_reconnect
                 else " Use Reconnect method or restart with --auto-reconnect.",
             )
-        await self._set_var("cls_state", int(self.device_state))
+        await self._set_var("device_state", int(self.device_state))
 
         async with self.server:
             log.info("OPC UA server started: %s", self.server.endpoint)

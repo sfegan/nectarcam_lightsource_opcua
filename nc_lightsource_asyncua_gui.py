@@ -954,7 +954,7 @@ class CalibBoxGUI(tk.Tk):
         for name, value in data.items():
             self._update_var(name, value)
 
-    # Map cls_state int to (label, colour)
+    # Map device_state int to (label, colour)
     _STATE_MAP = {0: ("Offline", YELLOW), 1: ("Disabled", TEXT_DIM),
                   2: ("Enabled", ACCENT2)}
 
@@ -996,7 +996,7 @@ class CalibBoxGUI(tk.Tk):
                 self._current_var.set(round(float(value), 4))
             elif n == "led_mask":
                 self._led_array.set_device_mask(int(value))
-            elif n == "cls_state":
+            elif n == "device_state":
                 label, col = self._STATE_MAP.get(int(value), ("Unknown", TEXT_DIM))
                 if self._info_state_var:
                     self._info_state_var.set(label)
