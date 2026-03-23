@@ -657,7 +657,7 @@ class SPEBoxDialect(_BoxDialect):
         s.frequency_dividend, mv = _dec_frequency(mv)      # C9-C12
         s.frequency_divider,  mv = _dec_divider(mv)        # C13-C15
         s.width,              mv = _dec_width(mv)          # C16-C17
-        s.temperature,        mv = _dec_temperature(mv)    # C18-C20
+        s.temperature,        mv = _dec_temperature_v45(mv)  # C18-C20 <- SPE seemingly uses same sensor as AIVFF, not FF
         s.faults,             mv = _dec_faults(mv)         # C21
         (s.light_pulse, s.lemo_out,
          s.fiber1_out, s.fiber2_out, s.lemo_in), mv = _dec_control(mv)  # C22
