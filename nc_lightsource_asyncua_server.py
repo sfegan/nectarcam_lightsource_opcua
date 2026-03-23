@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import errno
 import functools
 import logging
 import signal
@@ -744,7 +745,16 @@ class CalBoxConnection:
     # Connect / authenticate / close
     # ----------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def connect(self) -> tuple[bool, bool]:
+        """Attempt to open a TCP connection to the device.
+
+        Returns a ``(success, host_unreachable)`` tuple so callers can
+        distinguish a routing-level rejection (EHOSTUNREACH / ENETUNREACH)
+        from ordinary failures such as ECONNREFUSED or a timeout.  When
+        *host_unreachable* is True there is no point retrying quickly – the
+        device is not reachable on the network at all – so the caller should
+        jump straight to the maximum back-off delay.
+        """
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port),
@@ -753,11 +763,19 @@ class CalBoxConnection:
             sock = self._writer.transport.get_extra_info("socket")
             if sock:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            return True
-        except (OSError, asyncio.TimeoutError) as exc:
-            log.debug("Connection to %s:%d failed: %s", self.host, self.port, exc)
+            return True, False
+        except OSError as exc:
+            unreachable = exc.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH)
+            if unreachable:
+                log.debug("Host unreachable: %s:%d (%s)", self.host, self.port, exc)
+            else:
+                log.debug("Connection to %s:%d failed: %s", self.host, self.port, exc)
             self._reader = self._writer = None
-            return False
+            return False, unreachable
+        except asyncio.TimeoutError:
+            log.debug("Connection to %s:%d timed out", self.host, self.port)
+            self._reader = self._writer = None
+            return False, False
 
     async def authenticate(self) -> bool:
         if not self._writer:
@@ -1282,7 +1300,8 @@ class CalibrationBoxServer:
         await asyncio.sleep(0.5)
         log.info("Attempting reconnection to %s device %s:%d ...",
                  self.connection.dialect.NAME, self.connection.host, self.connection.port)
-        if await self.connection.connect() and await self.connection.authenticate():
+        ok, _unreachable = await self.connection.connect()
+        if ok and await self.connection.authenticate():
             log.info("Reconnected to %s device %s:%d.",
                      self.connection.dialect.NAME, self.connection.host, self.connection.port)
             self.device_state = DeviceState.Disabled
@@ -1367,11 +1386,23 @@ class CalibrationBoxServer:
         # poll period stable without ever firing multiple back-to-back calls
         # when the loop is unblocked after a long pause.
         next_tick = time.monotonic() + self.poll_interval
+
+        # Reconnect back-off state.  On each failed attempt the delay doubles
+        # up to MAX_RECONNECT_DELAY.  An EHOSTUNREACH / ENETUNREACH result
+        # jumps straight to the maximum – there is no value in retrying quickly
+        # when the device is not reachable at the routing level.
+        _MIN_RECONNECT_DELAY = self.poll_interval
+        _MAX_RECONNECT_DELAY = 30.0
+        reconnect_delay          = _MIN_RECONNECT_DELAY
+        next_reconnect_attempt   = 0.0   # 0 → attempt immediately on first offline tick
+
         while True:
             try:
                 state = await self.connection.get_status()
                 if self.device_state == DeviceState.Offline:
                     log.info("Device back online.")
+                reconnect_delay        = _MIN_RECONNECT_DELAY   # reset on success
+                next_reconnect_attempt = 0.0
                 await self._apply_state(state)
             except Exception as exc:
                 if self.device_state != DeviceState.Offline:
@@ -1380,15 +1411,45 @@ class CalibrationBoxServer:
                     await self._set_var("cls_state", int(self.device_state))
                     await self.connection.close()
                 elif self.auto_reconnect:
-                    log.info("Attempting reconnection to %s device %s:%d ...",
-                              self.connection.dialect.NAME, self.connection.host, self.connection.port)
-                    await self.connection.close()
-                    if (await self.connection.connect()
-                            and await self.connection.authenticate()):
-                        log.info("Reconnected to %s device %s:%d.",
-                                 self.connection.dialect.NAME, self.connection.host, self.connection.port)
+                    now = time.monotonic()
+                    if now < next_reconnect_attempt:
+                        log.debug(
+                            "Device offline, next reconnect attempt in %.0f s.",
+                            next_reconnect_attempt - now,
+                        )
                     else:
-                        log.debug("Reconnect failed, will retry.")
+                        log.info(
+                            "Attempting reconnection to %s device %s:%d ...",
+                            self.connection.dialect.NAME,
+                            self.connection.host, self.connection.port,
+                        )
+                        await self.connection.close()
+                        ok, host_unreachable = await self.connection.connect()
+                        if ok and await self.connection.authenticate():
+                            log.info(
+                                "Reconnected to %s device %s:%d.",
+                                self.connection.dialect.NAME,
+                                self.connection.host, self.connection.port,
+                            )
+                            reconnect_delay        = _MIN_RECONNECT_DELAY
+                            next_reconnect_attempt = 0.0
+                        else:
+                            if host_unreachable:
+                                # Routing-level rejection – jump straight to max delay.
+                                reconnect_delay = _MAX_RECONNECT_DELAY
+                                log.debug(
+                                    "Host unreachable; backing off to max delay (%.0f s).",
+                                    reconnect_delay,
+                                )
+                            else:
+                                reconnect_delay = min(
+                                    reconnect_delay * 2, _MAX_RECONNECT_DELAY
+                                )
+                                log.debug(
+                                    "Reconnect failed, next attempt in %.0f s.",
+                                    reconnect_delay,
+                                )
+                            next_reconnect_attempt = time.monotonic() + reconnect_delay
                 else:
                     log.debug("Device offline: %s", exc)
 
@@ -1411,8 +1472,8 @@ class CalibrationBoxServer:
         await self._init_server()
 
         log.info("Connecting to %s:%d ...", self.connection.host, self.connection.port)
-        connected = (await self.connection.connect()
-                     and await self.connection.authenticate())
+        ok, _unreachable = await self.connection.connect()
+        connected = ok and await self.connection.authenticate()
         if connected:
             self.device_state = DeviceState.Disabled
             log.info("Connected to calibration box.")
