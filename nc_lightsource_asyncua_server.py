@@ -980,7 +980,7 @@ class CalibrationBoxServer:
         ("device_connection_uptime",         0.0,   ua.VariantType.Double,
          ua.StatusCode(ua.StatusCodes.Good),
          "Seconds since the device last came online; 0.0 while offline (always Good status)"),
-        ("device_connection_established",    False, ua.VariantType.Boolean,
+        ("device_connected",               False, ua.VariantType.Boolean,
          ua.StatusCode(ua.StatusCodes.Good),
          "True when the calibration light source is reachable over TCP; never modified by subclasses"),
         ("device_state",          0,    ua.VariantType.Int32,
@@ -1210,7 +1210,7 @@ class CalibrationBoxServer:
         Also updates the device connection telemetry variables on every
         successful poll (i.e. every time this method is called):
 
-          • device_connection_established – set True
+          • device_connected – set True
           • device_connection_downtime    – reset to 0.0 on each success
           • device_connection_uptime      – ticking since the last online transition
         """
@@ -1486,13 +1486,15 @@ class CalibrationBoxServer:
         last_update_wall = None
         last_state = None
 
+        _good = ua.StatusCode(ua.StatusCodes.Good)
+
         while True:
             now_mono = time.monotonic()
             now_wall = datetime.datetime.now(datetime.timezone.utc)
 
             connected = False if self.device_state == DeviceState.Offline else True
 
-            if self.device_state == DeviceState.Offline and self.auto_reconnect:
+            if not connected and self.auto_reconnect:
                 if now_mono < next_reconnect_attempt:
                     log.debug("Device offline, next reconnect attempt in %.0f s.",
                         next_reconnect_attempt - now_mono)
@@ -1546,17 +1548,17 @@ class CalibrationBoxServer:
             if(last_state is not None):
                 await self._apply_state(last_state, now_mono - last_update_mono, last_update_wall, now_wall)
             else:
-                await self._set_var("device_state", int(self.device_state), _good, now_wall, now_wall)
-            _good = ua.StatusCode(ua.StatusCodes.Good)
+                await self._set_var("device_state", int(self.device_state), _good, now_wall)
+
             time_since_change = now_mono - last_state_change_at
             if self.device_state == DeviceState.Offline:
                 await self._set_var("device_connection_downtime", time_since_change, _good, now_wall)
                 await self._set_var("device_connection_uptime", 0.0, _good, now_wall)
-                await self._set_var("device_connection_established", True, _good, now_wall)
+                await self._set_var("device_connected", False, _good, now_wall)
             else:
                 await self._set_var("device_connection_downtime", 0.0, _good, now_wall)
                 await self._set_var("device_connection_uptime", time_since_change, _good, now_wall)
-                await self._set_var("device_connection_established", False, _good, now_wall)
+                await self._set_var("device_connected", True, _good, now_wall)
 
             # Advance next_tick by the smallest number of whole intervals that
             # puts it strictly in the future, then sleep until it arrives.
