@@ -962,56 +962,80 @@ class CalibrationBoxServer:
     # once at startup; the remainder are polled live from the device.
     # Descriptions sourced from ICD MST-CAM-ICD-0328-LUPM Ed.1 Rev.3 section 3.6.
     _MONITORING_VARS: ClassVar[list[tuple]] = [
-        ("device_host",        "",      ua.VariantType.String,
+        ("device_host",        "",      ua.VariantType.String, 
+         ua.StatusCode(ua.StatusCodes.Good),
          "IP address or hostname of the calibration light source device"),
         ("device_port",        0,       ua.VariantType.UInt16,
+         ua.StatusCode(ua.StatusCodes.Good),
          "TCP port of the calibration light source device (port 50001 is fixed by the device firmware)"),
         ("device_dialect",     "",      ua.VariantType.String,
+         ua.StatusCode(ua.StatusCodes.Good),
          "Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE"),
         ("device_polling_interval",         1.0,   ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.Good),
          "Configured poll interval in seconds"),
         ("device_connection_downtime",       0.0,   ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.Good),
          "Seconds since the last successful poll; 0.0 while connected (always Good status)"),
         ("device_connection_uptime",         0.0,   ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.Good),
          "Seconds since the device last came online; 0.0 while offline (always Good status)"),
         ("device_connection_established",    False, ua.VariantType.Boolean,
+         ua.StatusCode(ua.StatusCodes.Good),
          "True when the calibration light source is reachable over TCP; never modified by subclasses"),
+        ("device_state",          0,    ua.VariantType.Int32,
+         ua.StatusCode(ua.StatusCodes.Good),
+         "Server connection state: 0=Offline (not connected to device), "
+         "1=Disabled (connected, light pulse off), 2=Enabled (connected, light pulse on)"),
         ("led_mask",           8191,    ua.VariantType.UInt64,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "LED on/off bitmask: bit N = LED N+1 (bits 0-12, 13 LEDs total)"),
         ("voltage_set",        10.0,    ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "LED supply voltage setpoint in V (range 7.9-16.5 V, controls brightness of LEDs 1-13)"),
         ("voltage_actual",     10.0,    ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "LED supply voltage measured by the device in V"),
         ("duration",           0,       ua.VariantType.Int32,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Flash duration after Start in units of 0.1 s (range 0-1023; 0 = infinite until Stop)"),
         ("frequency_dividend", 10000.0, ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Flash frequency dividend in Hz (range 244.16-10659.56 Hz with divider=1)"),
         ("frequency_divider",  1,       ua.VariantType.Int32,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Flash frequency divider ratio (range 1-3000; use > 1 for frequencies below ~300 Hz, minimum 0.1 Hz)"),
         ("width",              1,       ua.VariantType.Int32,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Trigger output pulse width in units of 62.5 ns (range 1-1000, i.e. 62.5 ns to 62.5 us)"),
         ("temperature",        20.0,    ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Internal temperature of the calibration light source in degrees C"),
         ("humidity",           50.0,    ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Internal relative humidity in %RH (FF only; LSB = 0.04 %RH; always 50.0 for SPE/AIVFF)"),
         ("faults",             0,       ua.VariantType.Int64,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Fault flags bitmask: D0=power supply under-voltage (<8 V), D1=over-voltage (>30 V), "
          "D2=optical transmitter 1 fault, D3=optical transmitter 2 fault"),
         ("light_pulse",        False,   ua.VariantType.Boolean,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Light pulse flashing active (D0 of control byte; set by Start/Stop commands)"),
         ("lemo_out",           False,   ua.VariantType.Boolean,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "LVDS trigger output active (D1 of control byte)"),
         ("fiber1_out",         False,   ua.VariantType.Boolean,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Optical transmitter No.1 output active (D2 of control byte)"),
         ("fiber2_out",         False,   ua.VariantType.Boolean,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Optical transmitter No.2 output active (D3 of control byte)"),
         ("lemo_in",            False,   ua.VariantType.Boolean,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "External LEMO trigger input active (D4 of control byte)"),
         ("central_current",    0.0,     ua.VariantType.Double,
+         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
          "Centre LED No.7 drive current in mA (range 0-12 mA, LSB = 38.15 nA; SPE only, always 0.0 for FF/AIVFF)"),
-        ("device_state",          0,    ua.VariantType.Int32,
-         "Server connection state: 0=Offline (not connected to device), "
-         "1=Disabled (connected, light pulse off), 2=Enabled (connected, light pulse on)"),
     ]
 
     def __init__(
@@ -1052,11 +1076,7 @@ class CalibrationBoxServer:
         )
         self.device_state = DeviceState.Offline
         self._vars: dict  = {}
-        # Monotonic timestamp of the last online↔offline state transition.
-        # None until the first poll result is observed.
-        self._last_state_change_at: float | None = None
         # True when the device was offline on the previous poll cycle.
-        self._was_offline: bool = True
         self.server       = self._build_server(opcua_endpoint)
 
     # ----------------------------------------------------------------
@@ -1119,10 +1139,12 @@ class CalibrationBoxServer:
         await self._build_monitoring(ns, device)
         await self._build_methods(ns, device)
         # Write static connection-identity variables once at startup
-        await self._set_var("device_host",             self.connection.host)
-        await self._set_var("device_port",             self.connection.port)
-        await self._set_var("device_dialect",          self.connection.dialect.NAME)
-        await self._set_var("device_polling_interval", self.poll_interval)
+        now_wall = datetime.datetime.now(datetime.timezone.utc)
+        good = ua.StatusCode(ua.StatusCodes.Good)
+        await self._set_var("device_host",             self.connection.host,         good, now_wall)
+        await self._set_var("device_port",             self.connection.port,         good, now_wall)
+        await self._set_var("device_dialect",          self.connection.dialect.NAME, good, now_wall)
+        await self._set_var("device_polling_interval", self.poll_interval,           good, now_wall)
 
     # ----------------------------------------------------------------
     # Monitoring nodes
@@ -1138,11 +1160,11 @@ class CalibrationBoxServer:
                                    "device_polling_interval"})
         _poll_ms = self.poll_interval * 1000.0
 
-        for name, default, vtype, description in self._MONITORING_VARS:
+        for name, default, vtype, status, description in self._MONITORING_VARS:
             node_id = ua.NodeId(f"{self._monitoring_node_id}.{name}", ns)
             var = await monitoring.add_variable(
                 node_id, ua.QualifiedName(name, ns),
-                ua.Variant(default, vtype),
+                ua.Variant(default, vtype)
             )
             await var.write_attribute(
                 ua.AttributeIds.Description,
@@ -1156,25 +1178,33 @@ class CalibrationBoxServer:
                 ua.AttributeIds.MinimumSamplingInterval,
                 ua.DataValue(ua.Variant(min_sampling, ua.VariantType.Double)),
             )
+            await var.write_value(
+                ua.DataValue(
+                    ua.Variant(default, vtype),
+                    status,
+                    datetime.datetime.now(datetime.timezone.utc),
+                )
+            )            
             self._vars[name] = (var, vtype)
 
-    async def _set_var(self, name: str, value):
+    async def _set_var(self, name: str, value, status, source_timestamp):
         entry = self._vars.get(name)
         if entry is None:
+            log.error("No such monitoring variable %r", name)
             return
-
         node, vtype = entry
+
         try:
             await node.write_value(
                 ua.DataValue(
                     Value=ua.Variant(value, vtype),
-                    SourceTimestamp=datetime.datetime.now(datetime.timezone.utc),
-                )
-            )
+                    StatusCode_=status,
+                    SourceTimestamp=source_timestamp))
         except Exception as exc:
             log.error("Failed to update OPC UA variable %s: %s", name, exc)
 
-    async def _apply_state(self, state: BoxState):
+    async def _apply_state(self, state: BoxState, age: float, state_update_time: datetime.datetime, 
+                           now_time: datetime.datetime):
         """Push all BoxState fields into OPC UA monitoring nodes.
 
         Also updates the device connection telemetry variables on every
@@ -1184,44 +1214,24 @@ class CalibrationBoxServer:
           • device_connection_downtime    – reset to 0.0 on each success
           • device_connection_uptime      – ticking since the last online transition
         """
-        now_mono = time.monotonic()
-        now_wall = datetime.datetime.now(datetime.timezone.utc)
 
+        _good        = ua.StatusCode(ua.StatusCodes.Good)
+        _uncertain   = ua.StatusCode(ua.StatusCodes.UncertainLastUsableValue)
+        _bad_no_comm = ua.StatusCode(ua.StatusCodes.BadNoCommunication)
+        
+        status_code = _good
+        if age > 60.0:
+            status_code = _bad_no_comm
+        elif age > 0:
+            status_code = _uncertain
         d = state.as_dict()
         for name in self._vars:
             if name != "device_state" and name in d:
-                await self._set_var(name, d[name])
-        self.device_state = state.device_state
-        await self._set_var("device_state", int(self.device_state))
-
-        # ── connection telemetry ──────────────────────────────────────────────
-        if self._was_offline:
-            # Device just came back online: record the transition time.
-            self._last_state_change_at = now_mono
-            self._was_offline = False
-
-        uptime = (now_mono - self._last_state_change_at) if self._last_state_change_at is not None else 0.0
-
-        # Write connection builtins directly with SourceTimestamp so the
-        # timestamp reflects when the value was actually measured.
-        for name, value, vtype in [
-            ("device_connection_established", True,    ua.VariantType.Boolean),
-            ("device_connection_downtime",    0.0,     ua.VariantType.Double),
-            ("device_connection_uptime",      uptime,  ua.VariantType.Double),
-        ]:
-            entry = self._vars.get(name)
-            if entry is None:
-                continue
-            node, _ = entry
-            try:
-                await node.write_value(
-                    ua.DataValue(
-                        Value=ua.Variant(value, vtype),
-                        SourceTimestamp=now_wall,
-                    )
-                )
-            except Exception as exc:
-                log.error("Failed to update %s: %s", name, exc)
+                await self._set_var(name, d[name], status_code, now_time)
+        if age > 0.0:
+            await self._set_var("device_state", 0, _good, state_update_time) # Offline
+        else:
+            await self._set_var("device_state", int(state.device_state), _good, state_update_time)
 
     # ----------------------------------------------------------------
     # OPC UA methods
@@ -1341,7 +1351,8 @@ class CalibrationBoxServer:
         try:
             state = await coro
             if state is not None:
-                await self._apply_state(state)
+                now = datetime.datetime.now(datetime.timezone.utc)
+                await self._apply_state(state, age=0.0, state_update_time=now, now_time=now)
         except Exception as exc:
             log.warning("Command failed: %s", exc)
             raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
@@ -1371,20 +1382,20 @@ class CalibrationBoxServer:
     @_unwrap_variants
     async def _m_reconnect(self, parent):
         await self.connection.close()
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.25)
         log.info("Attempting reconnection to %s device %s:%d ...",
                  self.connection.dialect.NAME, self.connection.host, self.connection.port)
         ok, _unreachable = await self.connection.connect()
         if ok and await self.connection.authenticate():
             log.info("Reconnected to %s device %s:%d.",
-                     self.connection.dialect.NAME, self.connection.host, self.connection.port)
-            self.device_state = DeviceState.Disabled
-            await self._set_var("device_state", int(self.device_state))
-            await self._apply_state(await self.connection.get_status())
-            return []
+                    self.connection.dialect.NAME, self.connection.host, self.connection.port)
+            self.device_state = DeviceState.Disabled        
+            return await self._dispatch(self.connection.get_status())
         log.warning("Reconnect failed -- device still offline.")
         self.device_state = DeviceState.Offline
-        await self._set_var("device_state", int(self.device_state))
+        _good = ua.StatusCode(ua.StatusCodes.Good)
+        now_wall = datetime.datetime.now(datetime.timezone.utc)
+        await self._set_var("device_state", int(self.device_state), _good, now_wall)
         raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
 
     @_unwrap_variants
@@ -1470,116 +1481,82 @@ class CalibrationBoxServer:
         reconnect_delay          = _MIN_RECONNECT_DELAY
         next_reconnect_attempt   = 0.0   # 0 → attempt immediately on first offline tick
 
-        while True:
-            try:
-                state = await self.connection.get_status()
-                if self.device_state == DeviceState.Offline:
-                    log.info("Device back online.")
-                reconnect_delay        = _MIN_RECONNECT_DELAY   # reset on success
-                next_reconnect_attempt = 0.0
-                await self._apply_state(state)
-            except Exception as exc:
-                if self.device_state != DeviceState.Offline:
-                    log.warning("Poll failed, marking Offline: %s", exc)
-                    log.warning(
-                        "Auto-reconnect enabled, will attempt reconnection" if self.auto_reconnect
-                        else "Auto-reconnect disabled, use OPCUA 'Reconnect' method to reconnect",
-                    )
-                    self.device_state = DeviceState.Offline
-                    now_mono = time.monotonic()
-                    now_wall = datetime.datetime.now(datetime.timezone.utc)
-                    # Record transition time so downtime starts ticking from now.
-                    if not self._was_offline:
-                        self._last_state_change_at = now_mono
-                        self._was_offline = True
-                    await self._set_var("device_state", int(self.device_state))
-                    # Write connection builtins directly with SourceTimestamp.
-                    for _name, _val, _vtype in [
-                        ("device_connection_established", False, ua.VariantType.Boolean),
-                        ("device_connection_downtime",    0.0,   ua.VariantType.Double),
-                        ("device_connection_uptime",      0.0,   ua.VariantType.Double),
-                    ]:
-                        _entry = self._vars.get(_name)
-                        if _entry is not None:
-                            try:
-                                await _entry[0].write_value(
-                                    ua.DataValue(
-                                        Value=ua.Variant(_val, _vtype),
-                                        SourceTimestamp=now_wall,
-                                    )
-                                )
-                            except Exception as _exc:
-                                log.error("Failed to update %s: %s", _name, _exc)
-                    await self.connection.close()
-                elif self.auto_reconnect:
-                    now = time.monotonic()
-                    if now < next_reconnect_attempt:
-                        log.debug(
-                            "Device offline, next reconnect attempt in %.0f s.",
-                            next_reconnect_attempt - now,
-                        )
-                    else:
-                        log.info(
-                            "Attempting reconnection to %s device %s:%d ...",
-                            self.connection.dialect.NAME,
-                            self.connection.host, self.connection.port,
-                        )
-                        await self.connection.close()
-                        ok, host_unreachable = await self.connection.connect()
-                        if ok and await self.connection.authenticate():
-                            log.info(
-                                "Reconnected to %s device %s:%d.",
-                                self.connection.dialect.NAME,
-                                self.connection.host, self.connection.port,
-                            )
-                            reconnect_delay        = _MIN_RECONNECT_DELAY
-                            next_reconnect_attempt = 0.0
-                        else:
-                            if host_unreachable:
-                                # Routing-level rejection – jump straight to max delay.
-                                reconnect_delay = _MAX_RECONNECT_DELAY
-                                log.warning(
-                                    "Host unreachable; backing off to max delay (%.0f s).",
-                                    reconnect_delay,
-                                )
-                            else:
-                                reconnect_delay = min(
-                                    reconnect_delay * 2, _MAX_RECONNECT_DELAY
-                                )
-                                log.info(
-                                    "Reconnect failed, next attempt in %.0f s.",
-                                    reconnect_delay,
-                                )
-                            next_reconnect_attempt = time.monotonic() + reconnect_delay
-                else:
-                    log.debug("Device offline: %s", exc)
+        last_state_change_at = 0
+        last_update_mono = 0
+        last_update_wall = None
+        last_state = None
 
-            # Keep device_connection_downtime / device_connection_uptime ticking
-            # on every loop iteration, regardless of poll outcome, so OPC UA
-            # clients see time advancing continuously.
-            _now_mono = time.monotonic()
-            _now_wall = datetime.datetime.now(datetime.timezone.utc)
-            if self._last_state_change_at is not None:
-                _elapsed = _now_mono - self._last_state_change_at
-                if self._was_offline:
-                    _downtime, _uptime = _elapsed, 0.0
+        while True:
+            now_mono = time.monotonic()
+            now_wall = datetime.datetime.now(datetime.timezone.utc)
+
+            connected = False if self.device_state == DeviceState.Offline else True
+
+            if self.device_state == DeviceState.Offline and self.auto_reconnect:
+                if now_mono < next_reconnect_attempt:
+                    log.debug("Device offline, next reconnect attempt in %.0f s.",
+                        next_reconnect_attempt - now_mono)
                 else:
-                    _downtime, _uptime = 0.0, _elapsed
-                for _name, _val in [
-                    ("device_connection_downtime", _downtime),
-                    ("device_connection_uptime",   _uptime),
-                ]:
-                    _entry = self._vars.get(_name)
-                    if _entry is not None:
-                        try:
-                            await _entry[0].write_value(
-                                ua.DataValue(
-                                    Value=ua.Variant(_val, ua.VariantType.Double),
-                                    SourceTimestamp=_now_wall,
-                                )
-                            )
-                        except Exception as _exc:
-                            log.error("Failed to update %s: %s", _name, _exc)
+                    log.info("Attempting reconnection to %s device %s:%d ...",
+                        self.connection.dialect.NAME, self.connection.host, self.connection.port)
+
+                    await self.connection.close()
+                    ok, host_unreachable = await self.connection.connect()
+
+                    if ok and await self.connection.authenticate():
+                        log.info("Reconnected to %s device %s:%d.",
+                            self.connection.dialect.NAME, self.connection.host, self.connection.port)
+                        reconnect_delay = _MIN_RECONNECT_DELAY
+                        next_reconnect_attempt = 0.0
+                        connected = True
+                    else:
+                        if host_unreachable:
+                            # Routing-level rejection – jump straight to max delay.
+                            reconnect_delay = _MAX_RECONNECT_DELAY
+                            log.warning("Host unreachable; backing off to max delay (%.0f s).",
+                                reconnect_delay)
+                        else:
+                            reconnect_delay = min(reconnect_delay * 2, _MAX_RECONNECT_DELAY)
+                            log.info("Reconnect failed, next attempt in %.0f s.",
+                                reconnect_delay)
+                        next_reconnect_attempt = now_mono + reconnect_delay
+
+            if connected:
+                try:
+                    state = await self.connection.get_status()
+                    last_update_mono = now_mono
+                    last_update_wall = now_wall
+                    last_state = state
+                    if self.device_state == DeviceState.Offline:
+                        last_state_change_at = now_mono
+                    self.device_state = state.device_state
+                except Exception as exc:
+                    self.device_state = DeviceState.Offline
+                    last_state_change_at = now_mono                    
+                    log.warning("Device went offline: %s", 
+                                "auto-reconnect enabled, will attempt reconnection" if self.auto_reconnect
+                                else "Auto-reconnect disabled, use OPCUA 'Reconnect' method to reconnect")
+                    await self.connection.close()
+
+            # Write all state variables on every poll cycle, even if the device is offline, so that 
+            # the timestamps keep updating and the connection telemetry variables tick as expected.  
+            # When offline, the state variables will have BadNoCommunication status and retain their 
+            # last values (which is more informative than resetting to defaults or leaving them 
+            # unchanged with Good status).
+            if(last_state is not None):
+                await self._apply_state(last_state, now_mono - last_update_mono, last_update_wall, now_wall)
+            else:
+                await self._set_var("device_state", int(self.device_state), _good, now_wall, now_wall)
+            _good = ua.StatusCode(ua.StatusCodes.Good)
+            time_since_change = now_mono - last_state_change_at
+            if self.device_state == DeviceState.Offline:
+                await self._set_var("device_connection_downtime", time_since_change, _good, now_wall)
+                await self._set_var("device_connection_uptime", 0.0, _good, now_wall)
+                await self._set_var("device_connection_established", True, _good, now_wall)
+            else:
+                await self._set_var("device_connection_downtime", 0.0, _good, now_wall)
+                await self._set_var("device_connection_uptime", time_since_change, _good, now_wall)
+                await self._set_var("device_connection_established", False, _good, now_wall)
 
             # Advance next_tick by the smallest number of whole intervals that
             # puts it strictly in the future, then sleep until it arrives.
@@ -1612,7 +1589,9 @@ class CalibrationBoxServer:
                 " Auto-reconnect enabled." if self.auto_reconnect
                 else " Use Reconnect method or restart with --auto-reconnect.",
             )
-        await self._set_var("device_state", int(self.device_state))
+        _good = ua.StatusCode(ua.StatusCodes.Good)
+        now_wall = datetime.datetime.now(datetime.timezone.utc)
+        await self._set_var("device_state", int(self.device_state), _good, now_wall)
 
         async with self.server:
             log.info("OPC UA server started: %s", self.server.endpoint)
