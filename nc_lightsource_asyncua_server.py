@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import datetime
 import errno
 import functools
 import logging
@@ -791,7 +792,7 @@ class CalBoxConnection:
             self._earliest_cmd_time = time.monotonic() + self.POST_AUTH_DELAY
             return True
         except (OSError, asyncio.TimeoutError) as exc:
-            log.debug("Authentication failed: %s", exc)
+            log.error("Authentication failed: %s", exc)
             self._link_ok = False
             return False
 
@@ -967,15 +968,13 @@ class CalibrationBoxServer:
          "TCP port of the calibration light source device (port 50001 is fixed by the device firmware)"),
         ("device_dialect",     "",      ua.VariantType.String,
          "Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE"),
-        ("device_polling_timestamp",     None,  ua.VariantType.DateTime,
-         "Wall-clock time of the last successful poll (BadWaitingForInitialData until the first success)"),
-        ("device_polling_age",           0.0,   ua.VariantType.Double,
-         "Seconds elapsed since the last successful poll; always Good status, keeps incrementing while offline"),
-        ("device_polling_interval",      1.0,   ua.VariantType.Double,
+        ("device_polling_interval",         1.0,   ua.VariantType.Double,
          "Configured poll interval in seconds"),
-        ("device_polling_success_count", 0,     ua.VariantType.UInt32,
-         "Cumulative count of successful polls since the server started; always Good status; wraps at 2^32-1"),
-        ("device_connected",             False, ua.VariantType.Boolean,
+        ("device_connection_downtime",       0.0,   ua.VariantType.Double,
+         "Seconds since the last successful poll; 0.0 while connected (always Good status)"),
+        ("device_connection_uptime",         0.0,   ua.VariantType.Double,
+         "Seconds since the device last came online; 0.0 while offline (always Good status)"),
+        ("device_connection_established",    False, ua.VariantType.Boolean,
          "True when the calibration light source is reachable over TCP; never modified by subclasses"),
         ("led_mask",           8191,    ua.VariantType.UInt64,
          "LED on/off bitmask: bit N = LED N+1 (bits 0-12, 13 LEDs total)"),
@@ -1053,10 +1052,11 @@ class CalibrationBoxServer:
         )
         self.device_state = DeviceState.Offline
         self._vars: dict  = {}
-        # Monotonic timestamp of the last successful poll (None until first success).
-        self._last_poll_mono: float | None = None
-        # Cumulative count of successful polls; wraps at 2^32.
-        self._poll_success_count: int = 0
+        # Monotonic timestamp of the last online↔offline state transition.
+        # None until the first poll result is observed.
+        self._last_state_change_at: float | None = None
+        # True when the device was offline on the previous poll cycle.
+        self._was_offline: bool = True
         self.server       = self._build_server(opcua_endpoint)
 
     # ----------------------------------------------------------------
@@ -1124,16 +1124,6 @@ class CalibrationBoxServer:
         await self._set_var("device_dialect",          self.connection.dialect.NAME)
         await self._set_var("device_polling_interval", self.poll_interval)
 
-        # device_polling_timestamp and device_polling_age start as
-        # BadWaitingForInitialData until the first successful poll.
-        _waiting = ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData)
-        for _name in ("device_polling_timestamp", "device_polling_age"):
-            _node, _vtype = self._vars[_name]
-            try:
-                await _node.write_value(ua.DataValue(StatusCode_=_waiting))
-            except Exception as exc:
-                log.error("Failed to set initial status for %s: %s", _name, exc)
-
     # ----------------------------------------------------------------
     # Monitoring nodes
     # ----------------------------------------------------------------
@@ -1142,6 +1132,12 @@ class CalibrationBoxServer:
         mon_node_id = ua.NodeId(self._monitoring_node_id, ns)
         monitoring  = await device.add_object(
             mon_node_id, ua.QualifiedName(self.monitoring_path, ns))
+
+        # Static identity variables that never change after startup.
+        _static_vars = frozenset({"device_host", "device_port", "device_dialect",
+                                   "device_polling_interval"})
+        _poll_ms = self.poll_interval * 1000.0
+
         for name, default, vtype, description in self._MONITORING_VARS:
             node_id = ua.NodeId(f"{self._monitoring_node_id}.{name}", ns)
             var = await monitoring.add_variable(
@@ -1154,6 +1150,12 @@ class CalibrationBoxServer:
                                         ua.VariantType.LocalizedText)),
             )
             await var.set_read_only()
+            # MinimumSamplingInterval: -1 for static vars, poll_interval ms for the rest.
+            min_sampling = -1.0 if name in _static_vars else _poll_ms
+            await var.write_attribute(
+                ua.AttributeIds.MinimumSamplingInterval,
+                ua.DataValue(ua.Variant(min_sampling, ua.VariantType.Double)),
+            )
             self._vars[name] = (var, vtype)
 
     async def _set_var(self, name: str, value):
@@ -1163,7 +1165,12 @@ class CalibrationBoxServer:
 
         node, vtype = entry
         try:
-            await node.write_value(ua.Variant(value, vtype))
+            await node.write_value(
+                ua.DataValue(
+                    Value=ua.Variant(value, vtype),
+                    SourceTimestamp=datetime.datetime.now(datetime.timezone.utc),
+                )
+            )
         except Exception as exc:
             log.error("Failed to update OPC UA variable %s: %s", name, exc)
 
@@ -1173,12 +1180,13 @@ class CalibrationBoxServer:
         Also updates the device connection telemetry variables on every
         successful poll (i.e. every time this method is called):
 
-          • device_polling_timestamp  – wall-clock time of this poll
-          • device_polling_age        – resets to 0.0 on each success
-          • device_polling_success_count – incremented (wraps at 2^32)
-          • device_connected      – set True
+          • device_connection_established – set True
+          • device_connection_downtime    – reset to 0.0 on each success
+          • device_connection_uptime      – ticking since the last online transition
         """
-        import datetime as _dt
+        now_mono = time.monotonic()
+        now_wall = datetime.datetime.now(datetime.timezone.utc)
+
         d = state.as_dict()
         for name in self._vars:
             if name != "device_state" and name in d:
@@ -1186,26 +1194,34 @@ class CalibrationBoxServer:
         self.device_state = state.device_state
         await self._set_var("device_state", int(self.device_state))
 
-        # ── connection telemetry ──────────────────────────────────────
-        now_mono = time.monotonic()
-        now_wall = _dt.datetime.now(_dt.timezone.utc)
-        self._last_poll_mono = now_mono
-        self._poll_success_count = (self._poll_success_count + 1) & 0xFFFFFFFF
+        # ── connection telemetry ──────────────────────────────────────────────
+        if self._was_offline:
+            # Device just came back online: record the transition time.
+            self._last_state_change_at = now_mono
+            self._was_offline = False
 
-        # Stamp the timestamp node directly with a proper DataValue so we
-        # can carry Good status (write_value accepts ua.DataValue).
-        ts_node, _vt = self._vars.get("device_polling_timestamp", (None, None))
-        if ts_node is not None:
+        uptime = (now_mono - self._last_state_change_at) if self._last_state_change_at is not None else 0.0
+
+        # Write connection builtins directly with SourceTimestamp so the
+        # timestamp reflects when the value was actually measured.
+        for name, value, vtype in [
+            ("device_connection_established", True,    ua.VariantType.Boolean),
+            ("device_connection_downtime",    0.0,     ua.VariantType.Double),
+            ("device_connection_uptime",      uptime,  ua.VariantType.Double),
+        ]:
+            entry = self._vars.get(name)
+            if entry is None:
+                continue
+            node, _ = entry
             try:
-                await ts_node.write_value(
-                    ua.DataValue(ua.Variant(now_wall, ua.VariantType.DateTime))
+                await node.write_value(
+                    ua.DataValue(
+                        Value=ua.Variant(value, vtype),
+                        SourceTimestamp=now_wall,
+                    )
                 )
             except Exception as exc:
-                log.error("Failed to update device_polling_timestamp: %s", exc)
-
-        await self._set_var("device_polling_age",           0.0)
-        await self._set_var("device_polling_success_count", self._poll_success_count)
-        await self._set_var("device_connected",         True)
+                log.error("Failed to update %s: %s", name, exc)
 
     # ----------------------------------------------------------------
     # OPC UA methods
@@ -1464,10 +1480,36 @@ class CalibrationBoxServer:
                 await self._apply_state(state)
             except Exception as exc:
                 if self.device_state != DeviceState.Offline:
-                    log.error("Poll failed, marking Offline: %s", exc)
+                    log.warning("Poll failed, marking Offline: %s", exc)
+                    log.warning(
+                        "Auto-reconnect enabled, will attempt reconnection" if self.auto_reconnect
+                        else "Auto-reconnect disabled, use OPCUA 'Reconnect' method to reconnect",
+                    )
                     self.device_state = DeviceState.Offline
-                    await self._set_var("device_state",        int(self.device_state))
-                    await self._set_var("device_connected", False)
+                    now_mono = time.monotonic()
+                    now_wall = datetime.datetime.now(datetime.timezone.utc)
+                    # Record transition time so downtime starts ticking from now.
+                    if not self._was_offline:
+                        self._last_state_change_at = now_mono
+                        self._was_offline = True
+                    await self._set_var("device_state", int(self.device_state))
+                    # Write connection builtins directly with SourceTimestamp.
+                    for _name, _val, _vtype in [
+                        ("device_connection_established", False, ua.VariantType.Boolean),
+                        ("device_connection_downtime",    0.0,   ua.VariantType.Double),
+                        ("device_connection_uptime",      0.0,   ua.VariantType.Double),
+                    ]:
+                        _entry = self._vars.get(_name)
+                        if _entry is not None:
+                            try:
+                                await _entry[0].write_value(
+                                    ua.DataValue(
+                                        Value=ua.Variant(_val, _vtype),
+                                        SourceTimestamp=now_wall,
+                                    )
+                                )
+                            except Exception as _exc:
+                                log.error("Failed to update %s: %s", _name, _exc)
                     await self.connection.close()
                 elif self.auto_reconnect:
                     now = time.monotonic()
@@ -1496,7 +1538,7 @@ class CalibrationBoxServer:
                             if host_unreachable:
                                 # Routing-level rejection – jump straight to max delay.
                                 reconnect_delay = _MAX_RECONNECT_DELAY
-                                log.debug(
+                                log.warning(
                                     "Host unreachable; backing off to max delay (%.0f s).",
                                     reconnect_delay,
                                 )
@@ -1504,7 +1546,7 @@ class CalibrationBoxServer:
                                 reconnect_delay = min(
                                     reconnect_delay * 2, _MAX_RECONNECT_DELAY
                                 )
-                                log.debug(
+                                log.info(
                                     "Reconnect failed, next attempt in %.0f s.",
                                     reconnect_delay,
                                 )
@@ -1512,14 +1554,32 @@ class CalibrationBoxServer:
                 else:
                     log.debug("Device offline: %s", exc)
 
-            # Keep device_polling_age ticking on every loop iteration,
-            # regardless of whether the poll succeeded or the device is offline.
-            # This lets OPC UA clients see time advancing continuously.
-            _age_now = time.monotonic()
-            if self._last_poll_mono is not None:
-                await self._set_var(
-                    "device_polling_age", _age_now - self._last_poll_mono
-                )
+            # Keep device_connection_downtime / device_connection_uptime ticking
+            # on every loop iteration, regardless of poll outcome, so OPC UA
+            # clients see time advancing continuously.
+            _now_mono = time.monotonic()
+            _now_wall = datetime.datetime.now(datetime.timezone.utc)
+            if self._last_state_change_at is not None:
+                _elapsed = _now_mono - self._last_state_change_at
+                if self._was_offline:
+                    _downtime, _uptime = _elapsed, 0.0
+                else:
+                    _downtime, _uptime = 0.0, _elapsed
+                for _name, _val in [
+                    ("device_connection_downtime", _downtime),
+                    ("device_connection_uptime",   _uptime),
+                ]:
+                    _entry = self._vars.get(_name)
+                    if _entry is not None:
+                        try:
+                            await _entry[0].write_value(
+                                ua.DataValue(
+                                    Value=ua.Variant(_val, ua.VariantType.Double),
+                                    SourceTimestamp=_now_wall,
+                                )
+                            )
+                        except Exception as _exc:
+                            log.error("Failed to update %s: %s", _name, _exc)
 
             # Advance next_tick by the smallest number of whole intervals that
             # puts it strictly in the future, then sleep until it arrives.
