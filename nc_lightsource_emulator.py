@@ -21,6 +21,7 @@ Usage
 import argparse
 import logging
 import math
+import random
 import socket
 import struct
 import threading
@@ -105,10 +106,13 @@ class DeviceState:
         self._duration_timer: Optional[threading.Timer] = None
         self._voltage_ramp_thread: Optional[threading.Thread] = None
         self._voltage_ramp_stop  = threading.Event()
+        self._sensor_walk_thread:  Optional[threading.Thread] = None
+        self._sensor_walk_stop   = threading.Event()
         
         # Skip starting background threads for temporary instances used only for encoding
         if not _skip_threads:
             self._start_voltage_ramp()
+            self._start_sensor_walk()
 
     # ----------------------------------------------------------
     def reset(self):
@@ -128,6 +132,8 @@ class DeviceState:
             self.enabled             = False
             self.central_current     = 0.0
             self.connected           = False
+            self.temperature         = 22.3
+            self.humidity            = 45.0
         log.info("Device state reset to defaults.")
 
     # ----------------------------------------------------------
@@ -210,12 +216,42 @@ class DeviceState:
                               self.voltage_actual, target)
             time.sleep(self._RAMP_INTERVAL)
 
+    # ----------------------------------------------------------
+    # Sensor random walk
+    # ----------------------------------------------------------
+    _WALK_INTERVAL = 1.0  # seconds
+
+    def _start_sensor_walk(self):
+        self._sensor_walk_stop.clear()
+        self._sensor_walk_thread = threading.Thread(
+            target=self._sensor_walk_loop,
+            name="sensor-walk",
+            daemon=True,
+        )
+        self._sensor_walk_thread.start()
+
+    def _sensor_walk_loop(self):
+        while not self._sensor_walk_stop.is_set():
+            with self._lock:
+                # Random walk: ±0.05 °C, ±0.1 %RH
+                self.temperature += random.uniform(-0.05, 0.05)
+                self.humidity    += random.uniform(-0.1, 0.1)
+                
+                # Clamp to reasonable bounds
+                self.temperature = max(-10.0, min(50.0, self.temperature))
+                self.humidity    = max(0.0,   min(100.0, self.humidity))
+                
+            time.sleep(self._WALK_INTERVAL)
+
     def stop_background_tasks(self):
         """Call on shutdown to clean up the ramp thread and any pending timers."""
         self._cancel_duration_timer()
         self._voltage_ramp_stop.set()
+        self._sensor_walk_stop.set()
         if self._voltage_ramp_thread is not None:
             self._voltage_ramp_thread.join(timeout=2.0)
+        if self._sensor_walk_thread is not None:
+            self._sensor_walk_thread.join(timeout=2.0)
 
 
 # ==========================================================
@@ -361,10 +397,11 @@ class FrameCodec:
     # Temperature  (13-bit, two sub-protocols)
     # ----------------------------------------------------------
     @staticmethod
-    def encode_temperature(temp: float, release: int) -> tuple:
-        sign_bit = 1 if temp < 0 else 0
-        if release < 6:
-            # Protocol v4.5
+    def encode_temperature(temp: float, product: int, release: int) -> tuple:
+        # SPE always uses the "V4.5" (12-bit signed) sensor style, even in V6 protocol
+        if product == ProductCode.SPE or release < 6:
+            # Protocol v4.5 (AIVFF and SPE)
+            sign_bit = 1 if temp < 0 else 0
             abs_t = abs(temp)
             msb   = int(abs_t / 32) & 0x03
             mid   = int(abs_t % 32) & 0x1F
@@ -373,9 +410,10 @@ class FrameCodec:
             s19 = 0x80 | mid
             s20 = 0x80 | lsb
         else:
-            # Protocol v4.6
-            code = int((abs(temp) + 46.85) * 4096 / 175.72) & 0xFFF
-            s18 = 0x80 | (sign_bit << 2) | ((code >> 10) & 0x03)
+            # Protocol v6 (FF V6+ / SHT25)
+            # ICD says: T = code * 175.72 / 4096 - 46.85
+            code = int((temp + 46.85) * 4096 / 175.72) & 0xFFF
+            s18 = 0x80 | ((code >> 10) & 0x03)
             s19 = 0x80 | ((code >> 5) & 0x1F)
             s20 = 0x80 | (code & 0x1F)
         return s18, s19, s20
@@ -449,7 +487,7 @@ class FrameCodec:
         # S16-S17: pulse width
         s[16], s[17] = cls.encode_width(st.width)
         # S18-S20: temperature
-        s[18], s[19], s[20] = cls.encode_temperature(st.temperature, st.release)
+        s[18], s[19], s[20] = cls.encode_temperature(st.temperature, st.product, st.release)
         # S21: error/fault mask
         s[21] = 0xA0 | (st.error_mask & 0x1F)
         # S22: control mask
