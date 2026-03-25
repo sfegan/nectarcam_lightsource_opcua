@@ -294,28 +294,38 @@ def _enc_central_current(mA: float) -> bytes:
 # returns the decoded value paired with the remaining view.  Callers chain
 # them as:  value, mv = _dec_*(mv)
 
+def _dec10(mv: memoryview) -> tuple[int, memoryview]:
+    return ((mv[0] & _MASK5) << 5) | (mv[1] & _MASK5), mv[2:]
+
+def _dec15(mv: memoryview) -> tuple[int, memoryview]:
+    return ((mv[0] & _MASK5) << 10) | ((mv[1] & _MASK5) << 5) | (mv[2] & _MASK5), mv[3:]
+
+def _dec20(mv: memoryview) -> tuple[int, memoryview]:
+    return (((mv[0] & _MASK5) << 15) | ((mv[1] & _MASK5) << 10)
+           | ((mv[2] & _MASK5) <<  5) |  (mv[3] & _MASK5)), mv[4:]
+
+
 def _dec_voltage_set(mv: memoryview) -> tuple[float, memoryview]:
-    code = ((mv[0] & _MASK5) << 5) | (mv[1] & _MASK5)
-    return 7.9 + code * 8.44 / 950, mv[2:]
+    code, mv = _dec10(mv)
+    return 7.9 + code * 8.44 / 950, mv
 
 def _dec_voltage_actual(mv: memoryview) -> tuple[float, memoryview]:
-    code = ((mv[0] & _MASK5) << 5) | (mv[1] & _MASK5)
-    return 0.2 + code * 12.5 * 3.3 / 1023, mv[2:]
+    code, mv = _dec10(mv)
+    return 0.2 + code * 12.5 * 3.3 / 1023, mv
 
 def _dec_duration(mv: memoryview) -> tuple[int, memoryview]:
-    return ((mv[0] & _MASK5) << 5) | (mv[1] & _MASK5), mv[2:]
+    return _dec10(mv)
 
 def _dec_frequency(mv: memoryview) -> tuple[float, memoryview]:
-    code = (((mv[0] & _MASK5) << 15) | ((mv[1] & _MASK5) << 10)
-           | ((mv[2] & _MASK5) <<  5) |  (mv[3] & _MASK5))
-    return _FREQ_SCALE / (code + 1), mv[4:]
+    code, mv = _dec20(mv)
+    return _FREQ_SCALE / (code + 1), mv
 
 def _dec_divider(mv: memoryview) -> tuple[int, memoryview]:
-    code = ((mv[0] & _MASK5) << 10) | ((mv[1] & _MASK5) << 5) | (mv[2] & _MASK5)
-    return code + 1, mv[3:]
+    code, mv = _dec15(mv)
+    return code + 1, mv
 
 def _dec_width(mv: memoryview) -> tuple[int, memoryview]:
-    return ((mv[0] & _MASK5) << 5) | (mv[1] & _MASK5), mv[2:]
+    return _dec10(mv)
 
 def _dec_temperature(mv: memoryview) -> tuple[float, memoryview]:
     # SHT25 (protocol V6+): unsigned 12-bit code, negative temps emerge naturally
@@ -324,11 +334,7 @@ def _dec_temperature(mv: memoryview) -> tuple[float, memoryview]:
     return code * 175.72 / 4096 - 46.85, mv[3:]
 
 def _dec_temperature_v45(mv: memoryview) -> tuple[float, memoryview]:
-    # Protocol V4.5 (AIVFF) – formula from CalBoxConfig.cpp L616:
-    #   abs_value = 32.0    * (C18 & 0x03)   # C18 2 LSB bits → integer degrees x32
-    #             +  1.0    * (C19 & 0x1F)   # C19 5 LSB bits → integer degrees
-    #             +  0.0625 * (C20 & 0x1F)   # C20 5 LSB bits → fractional degrees
-    # Sign is carried in bit 2 of C18 (same position as the SHT25 encoder).
+    # Protocol V4.5 (AIVFF) – formula from CalBoxConfig.cpp L616
     sign      = -1.0 if (mv[0] & 0x04) else 1.0
     abs_value = 32.0 * (mv[0] & 0x03) + 1.0 * (mv[1] & _MASK5) + 0.0625 * (mv[2] & _MASK5)
     return sign * abs_value, mv[3:]
@@ -348,9 +354,8 @@ def _dec_humidity(mv: memoryview) -> tuple[float, memoryview]:
     return code * 125 / 4096.0 - 6.0, mv[3:]
 
 def _dec_central_current(mv: memoryview) -> tuple[float, memoryview]:
-    code = (((mv[0] & _MASK5) << 15) | ((mv[1] & _MASK5) << 10)
-           | ((mv[2] & _MASK5) <<  5) |  (mv[3] & _MASK5))
-    return code * _CURRENT_STEP_MA, mv[4:]
+    code, mv = _dec20(mv)
+    return code * _CURRENT_STEP_MA, mv
 
 def _dec_metadata(mv: memoryview) -> tuple[tuple[int, int, int], memoryview]:
     """Decode (product_code, serial_number, software_release); leave CR LF in remainder."""
@@ -742,6 +747,16 @@ class CalBoxConnection:
     def is_connected(self) -> bool:
         return self._link_ok and self._writer is not None
 
+    def _locked_cmd(fn):
+        """Decorator for connection methods that need the lock and rate-limiting."""
+        @functools.wraps(fn)
+        async def wrapper(self, *args, **kwargs):
+            async with self._lock:
+                await self._ensure_connected()
+                await self._rate_limit()
+                return await fn(self, *args, **kwargs)
+        return wrapper
+
     # ----------------------------------------------------------------
     # Connect / authenticate / close
     # ----------------------------------------------------------------
@@ -810,52 +825,40 @@ class CalBoxConnection:
     # Public command API
     # ----------------------------------------------------------------
 
+    @_locked_cmd
     async def get_status(self) -> BoxState:
-        async with self._lock:
-            await self._ensure_connected()
-            await self._rate_limit()
-            return await self._exchange(self.dialect.encode_simple_cmd(Cmd.GET_STATUS))
+        return await self._exchange(self.dialect.encode_simple_cmd(Cmd.GET_STATUS))
 
+    @_locked_cmd
     async def start(self) -> BoxState:
-        async with self._lock:
-            await self._ensure_connected()
-            await self._rate_limit()
-            log.info("Starting light source")
-            return await self._exchange(self.dialect.encode_simple_cmd(Cmd.START))
+        log.info("Starting light source")
+        return await self._exchange(self.dialect.encode_simple_cmd(Cmd.START))
 
+    @_locked_cmd
     async def stop(self) -> BoxState:
-        async with self._lock:
-            await self._ensure_connected()
-            await self._rate_limit()
-            log.info("Stopping light source")
-            return await self._exchange(self.dialect.encode_simple_cmd(Cmd.STOP))
+        log.info("Stopping light source")
+        return await self._exchange(self.dialect.encode_simple_cmd(Cmd.STOP))
 
+    @_locked_cmd
     async def reboot(self):
-        async with self._lock:
-            await self._ensure_connected()
-            await self._rate_limit()
-            log.info("Rebooting device")
-            await self._send(self.dialect.encode_simple_cmd(Cmd.RESET))
-            # Reset yields no response
+        log.info("Rebooting device")
+        await self._send(self.dialect.encode_simple_cmd(Cmd.RESET))
+        # Reset yields no response
 
+    @_locked_cmd
     async def configure(self, state: BoxState) -> BoxState:
         """Send a full ConfigSet frame and return the resulting BoxState."""
-        async with self._lock:
-            await self._ensure_connected()
-            await self._rate_limit()
-            return await self._exchange(self.dialect.encode_configure(state))
+        return await self._exchange(self.dialect.encode_configure(state))
 
+    @_locked_cmd
     async def modify(self, fn: Callable[[BoxState], None]) -> BoxState:
         """
         Atomically fetch current state, apply fn(state) in-place, send the
         updated ConfigSet, and return the device's fresh response.
         """
-        async with self._lock:
-            await self._ensure_connected()
-            await self._rate_limit()
-            state = await self._exchange(self.dialect.encode_simple_cmd(Cmd.GET_STATUS))
-            fn(state)
-            return await self._exchange(self.dialect.encode_configure(state))
+        state = await self._exchange(self.dialect.encode_simple_cmd(Cmd.GET_STATUS))
+        fn(state)
+        return await self._exchange(self.dialect.encode_configure(state))
 
     # ----------------------------------------------------------------
     # Internal helpers
@@ -1397,22 +1400,9 @@ class CalibrationBoxServer:
         # during the reconnect window.
         self.device_state = DeviceState.Offline
         
-        # Acquire the connection lock to serialize reconnect with any in-flight commands.
-        # This prevents concurrent operations from trying to use the socket while we're
-        # closing and reopening it.
-        async with self.connection._lock:
-            await self.connection.close()
-            await asyncio.sleep(0.25)
-            log.info("Attempting reconnection to %s device %s:%d ...",
-                     self.connection.dialect.NAME, self.connection.host, self.connection.port)
-            ok, _unreachable = await self.connection.connect()
-            if ok and await self.connection.authenticate():
-                log.info("Reconnected to %s device %s:%d.",
-                        self.connection.dialect.NAME, self.connection.host, self.connection.port)
-                self.device_state = DeviceState.Disabled
-                # Now that we're reconnected, get_status() will acquire the lock again
-        
-        if self.device_state == DeviceState.Disabled:
+        ok, _unreachable = await self._attempt_reconnect()
+        if ok:
+            self.device_state = DeviceState.Disabled
             # Successfully reconnected; fetch current state
             return await self._dispatch(self.connection.get_status())
         else:
@@ -1487,6 +1477,24 @@ class CalibrationBoxServer:
     # Poll task
     # ----------------------------------------------------------------
 
+    async def _attempt_reconnect(self) -> tuple[bool, bool]:
+        """Attempt to close and reopen the connection.
+        Returns (success, host_unreachable)."""
+        log.info("Attempting reconnection to %s device %s:%d ...",
+                 self.connection.dialect.NAME, self.connection.host, self.connection.port)
+
+        # Acquire the connection lock to serialize reconnect with any in-flight commands.
+        # This prevents concurrent operations from trying to use the socket while we're
+        # closing and reopening it.
+        async with self.connection._lock:
+            await self.connection.close()
+            ok, host_unreachable = await self.connection.connect()
+            if ok and await self.connection.authenticate():
+                log.info("Reconnected to %s device %s:%d.",
+                         self.connection.dialect.NAME, self.connection.host, self.connection.port)
+                return True, False
+            return False, host_unreachable
+
     async def _poll_loop(self):
         # Phase-locked loop: track the ideal next-tick time and always sleep
         # to the next future tick, skipping any ticks that have already passed
@@ -1524,33 +1532,22 @@ class CalibrationBoxServer:
                     log.debug("Device offline, next reconnect attempt in %.0f s.",
                         next_reconnect_attempt - now_mono)
                 else:
-                    log.info("Attempting reconnection to %s device %s:%d ...",
-                        self.connection.dialect.NAME, self.connection.host, self.connection.port)
-
-                    # Acquire the connection lock to serialize reconnect with any in-flight commands.
-                    # This prevents concurrent operations from trying to use the socket while we're
-                    # closing and reopening it.
-                    async with self.connection._lock:
-                        await self.connection.close()
-                        ok, host_unreachable = await self.connection.connect()
-                        
-                        if ok and await self.connection.authenticate():
-                            log.info("Reconnected to %s device %s:%d.",
-                                self.connection.dialect.NAME, self.connection.host, self.connection.port)
-                            reconnect_delay = _MIN_RECONNECT_DELAY
-                            next_reconnect_attempt = 0.0
-                            connected = True
+                    ok, host_unreachable = await self._attempt_reconnect()
+                    if ok:
+                        reconnect_delay = _MIN_RECONNECT_DELAY
+                        next_reconnect_attempt = 0.0
+                        connected = True
+                    else:
+                        if host_unreachable:
+                            # Routing-level rejection – jump straight to max delay.
+                            reconnect_delay = _MAX_RECONNECT_DELAY
+                            log.warning("Host unreachable; backing off to max delay (%.0f s).",
+                                reconnect_delay)
                         else:
-                            if host_unreachable:
-                                # Routing-level rejection – jump straight to max delay.
-                                reconnect_delay = _MAX_RECONNECT_DELAY
-                                log.warning("Host unreachable; backing off to max delay (%.0f s).",
-                                    reconnect_delay)
-                            else:
-                                reconnect_delay = min(reconnect_delay * 2, _MAX_RECONNECT_DELAY)
-                                log.info("Reconnect failed, next attempt in %.0f s.",
-                                    reconnect_delay)
-                            next_reconnect_attempt = now_mono + reconnect_delay
+                            reconnect_delay = min(reconnect_delay * 2, _MAX_RECONNECT_DELAY)
+                            log.info("Reconnect failed, next attempt in %.0f s.",
+                                reconnect_delay)
+                        next_reconnect_attempt = now_mono + reconnect_delay
 
             if connected:
                 try:
