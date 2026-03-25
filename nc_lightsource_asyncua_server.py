@@ -955,7 +955,14 @@ class CalibrationBoxServer:
     _DEFAULT_ROOT            = "CalibrationLightSource"
     _DEFAULT_MONITORING_PATH = "Monitoring"
 
-    # (name, initial value, OPC UA variant type, description)
+    # OPC UA Status Codes
+    STATUS_GOOD      = ua.StatusCode(ua.StatusCodes.Good)
+    STATUS_WAITING   = ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData)
+    STATUS_UNCERTAIN = ua.StatusCode(ua.StatusCodes.UncertainLastUsableValue)
+    STATUS_OFFLINE   = ua.StatusCode(ua.StatusCodes.BadNoCommunication)
+    STATUS_BAD       = ua.StatusCode(ua.StatusCodes.Bad)
+
+    # (name, initial value, OPC UA variant type, status, description)
     # Each entry becomes a variable node at:
     #   ns=2;s=CalibrationLightSource.Monitoring.<n>
     # host, port, dialect are static connection-identity variables written
@@ -963,78 +970,78 @@ class CalibrationBoxServer:
     # Descriptions sourced from ICD MST-CAM-ICD-0328-LUPM Ed.1 Rev.3 section 3.6.
     _MONITORING_VARS: ClassVar[list[tuple]] = [
         ("device_host",        "",      ua.VariantType.String, 
-         ua.StatusCode(ua.StatusCodes.Good),
+         STATUS_GOOD,
          "IP address or hostname of the calibration light source device"),
         ("device_port",        0,       ua.VariantType.UInt16,
-         ua.StatusCode(ua.StatusCodes.Good),
+         STATUS_GOOD,
          "TCP port of the calibration light source device (port 50001 is fixed by the device firmware)"),
         ("device_dialect",     "",      ua.VariantType.String,
-         ua.StatusCode(ua.StatusCodes.Good),
+         STATUS_GOOD,
          "Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE"),
         ("device_polling_interval",         1.0,   ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.Good),
+         STATUS_GOOD,
          "Configured poll interval in seconds"),
         ("device_connection_downtime",       0.0,   ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.Good),
+         STATUS_GOOD,
          "Seconds since the last successful poll; 0.0 while connected (always Good status)"),
         ("device_connection_uptime",         0.0,   ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.Good),
+         STATUS_GOOD,
          "Seconds since the device last came online; 0.0 while offline (always Good status)"),
         ("device_connected",               False, ua.VariantType.Boolean,
-         ua.StatusCode(ua.StatusCodes.Good),
+         STATUS_GOOD,
          "True when the calibration light source is reachable over TCP; never modified by subclasses"),
         ("device_state",          0,    ua.VariantType.Int32,
-         ua.StatusCode(ua.StatusCodes.Good),
+         STATUS_GOOD,
          "Server connection state: 0=Offline (not connected to device), "
          "1=Disabled (connected, light pulse off), 2=Enabled (connected, light pulse on)"),
         ("led_mask",           8191,    ua.VariantType.UInt64,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "LED on/off bitmask: bit N = LED N+1 (bits 0-12, 13 LEDs total)"),
         ("voltage_set",        10.0,    ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "LED supply voltage setpoint in V (range 7.9-16.5 V, controls brightness of LEDs 1-13)"),
         ("voltage_actual",     10.0,    ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "LED supply voltage measured by the device in V"),
         ("duration",           0,       ua.VariantType.Int32,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Flash duration after Start in units of 0.1 s (range 0-1023; 0 = infinite until Stop)"),
         ("frequency_dividend", 10000.0, ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Flash frequency dividend in Hz (range 244.16-10659.56 Hz with divider=1)"),
         ("frequency_divider",  1,       ua.VariantType.Int32,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Flash frequency divider ratio (range 1-3000; use > 1 for frequencies below ~300 Hz, minimum 0.1 Hz)"),
         ("width",              1,       ua.VariantType.Int32,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Trigger output pulse width in units of 62.5 ns (range 1-1000, i.e. 62.5 ns to 62.5 us)"),
         ("temperature",        20.0,    ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Internal temperature of the calibration light source in degrees C"),
         ("humidity",           50.0,    ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Internal relative humidity in %RH (FF only; LSB = 0.04 %RH; always 50.0 for SPE/AIVFF)"),
         ("faults",             0,       ua.VariantType.Int64,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Fault flags bitmask: D0=power supply under-voltage (<8 V), D1=over-voltage (>30 V), "
          "D2=optical transmitter 1 fault, D3=optical transmitter 2 fault"),
         ("light_pulse",        False,   ua.VariantType.Boolean,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Light pulse flashing active (D0 of control byte; set by Start/Stop commands)"),
         ("lemo_out",           False,   ua.VariantType.Boolean,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "LVDS trigger output active (D1 of control byte)"),
         ("fiber1_out",         False,   ua.VariantType.Boolean,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Optical transmitter No.1 output active (D2 of control byte)"),
         ("fiber2_out",         False,   ua.VariantType.Boolean,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Optical transmitter No.2 output active (D3 of control byte)"),
         ("lemo_in",            False,   ua.VariantType.Boolean,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "External LEMO trigger input active (D4 of control byte)"),
         ("central_current",    0.0,     ua.VariantType.Double,
-         ua.StatusCode(ua.StatusCodes.BadWaitingForInitialData),
+         STATUS_WAITING,
          "Centre LED No.7 drive current in mA (range 0-12 mA, LSB = 38.15 nA; SPE only, always 0.0 for FF/AIVFF)"),
     ]
 
@@ -1140,11 +1147,10 @@ class CalibrationBoxServer:
         await self._build_methods(ns, device)
         # Write static connection-identity variables once at startup
         now_wall = datetime.datetime.now(datetime.timezone.utc)
-        good = ua.StatusCode(ua.StatusCodes.Good)
-        await self._set_var("device_host",             self.connection.host,         good, now_wall)
-        await self._set_var("device_port",             self.connection.port,         good, now_wall)
-        await self._set_var("device_dialect",          self.connection.dialect.NAME, good, now_wall)
-        await self._set_var("device_polling_interval", self.poll_interval,           good, now_wall)
+        await self._set_var("device_host",             self.connection.host,         self.STATUS_GOOD, now_wall)
+        await self._set_var("device_port",             self.connection.port,         self.STATUS_GOOD, now_wall)
+        await self._set_var("device_dialect",          self.connection.dialect.NAME, self.STATUS_GOOD, now_wall)
+        await self._set_var("device_polling_interval", self.poll_interval,           self.STATUS_GOOD, now_wall)
 
     # ----------------------------------------------------------------
     # Monitoring nodes
@@ -1213,23 +1219,20 @@ class CalibrationBoxServer:
         - BadNoCommunication if age is > 60 seconds (device is likely offline)
         """
 
-        _good        = ua.StatusCode(ua.StatusCodes.Good)
-        _uncertain   = ua.StatusCode(ua.StatusCodes.UncertainLastUsableValue)
-        _bad_no_comm = ua.StatusCode(ua.StatusCodes.BadNoCommunication)
-        
-        status_code = _good
+        status_code = self.STATUS_GOOD
         if age > 60.0:
-            status_code = _bad_no_comm
+            status_code = self.STATUS_OFFLINE
         elif age > 0:
-            status_code = _uncertain
+            status_code = self.STATUS_UNCERTAIN
         d = state.as_dict()
         for name in self._vars:
             if name != "device_state" and name in d:
                 await self._set_var(name, d[name], status_code, now_time)
         if age > 0.0:
-            await self._set_var("device_state", 0, _good, state_update_time) # Offline
+            await self._set_var("device_state", 0, self.STATUS_GOOD, state_update_time) # Offline
         else:
-            await self._set_var("device_state", int(state.device_state), _good, state_update_time)
+            await self._set_var("device_state", int(state.device_state), self.STATUS_GOOD, state_update_time)
+
 
     # ----------------------------------------------------------------
     # OPC UA methods
@@ -1353,7 +1356,7 @@ class CalibrationBoxServer:
                 await self._apply_state(state, age=0.0, state_update_time=now, now_time=now)
         except Exception as exc:
             log.warning("Command failed: %s", exc)
-            raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
+            raise ua.UaStatusCodeError(self.STATUS_BAD)
         return []
 
     # ----------------------------------------------------------------
@@ -1374,7 +1377,7 @@ class CalibrationBoxServer:
             await self.connection.reboot()
         except Exception as exc:
             log.warning("Reboot failed: %s", exc)
-            raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
+            raise ua.UaStatusCodeError(self.STATUS_BAD)
         return []
 
     @_unwrap_variants
@@ -1405,56 +1408,54 @@ class CalibrationBoxServer:
         else:
             # Reconnect failed; device_state is already Offline from the beginning
             log.warning("Reconnect failed -- device still offline.")
-            _good = ua.StatusCode(ua.StatusCodes.Good)
             now_wall = datetime.datetime.now(datetime.timezone.utc)
-            await self._set_var("device_state", int(self.device_state), _good, now_wall)
-            raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
+            await self._set_var("device_state", int(self.device_state), self.STATUS_GOOD, now_wall)
+            raise ua.UaStatusCodeError(self.STATUS_BAD)
 
     @_unwrap_variants
     async def _m_get_status(self, parent):
         return await self._dispatch(self.connection.get_status())
 
+    async def _update_box_state(self, **kwargs):
+        """Helper to modify BoxState and dispatch to connection.modify."""
+        def _mod(s: BoxState):
+            for k, v in kwargs.items():
+                setattr(s, k, v)
+        return await self._dispatch(self.connection.modify(_mod))
+
     @_unwrap_variants
     async def _m_set_leds(self, parent, mask: int):
-        def _mod(s: BoxState): s.led_mask = mask
-        return await self._dispatch(self.connection.modify(_mod))
+        return await self._update_box_state(led_mask=mask)
 
     @_unwrap_variants
     async def _m_set_voltage(self, parent, volts: float):
-        def _mod(s: BoxState): s.voltage_set = volts
-        return await self._dispatch(self.connection.modify(_mod))
+        return await self._update_box_state(voltage_set=volts)
 
     @_unwrap_variants
     async def _m_set_duration(self, parent, duration: int):
-        def _mod(s: BoxState): s.duration = duration
-        return await self._dispatch(self.connection.modify(_mod))
+        return await self._update_box_state(duration=duration)
 
     @_unwrap_variants
     async def _m_set_frequency(self, parent, dividend: float, divider: int):
-        def _mod(s: BoxState):
-            s.frequency_dividend = dividend
-            s.frequency_divider  = divider
-        return await self._dispatch(self.connection.modify(_mod))
+        return await self._update_box_state(frequency_dividend=dividend,
+                                           frequency_divider=divider)
 
     @_unwrap_variants
     async def _m_set_current(self, parent, mA: float):
-        def _mod(s: BoxState): s.central_current = mA
-        return await self._dispatch(self.connection.modify(_mod))
+        return await self._update_box_state(central_current=mA)
 
     @_unwrap_variants
     async def _m_set_width(self, parent, width: int):
-        def _mod(s: BoxState): s.width = width
-        return await self._dispatch(self.connection.modify(_mod))
+        return await self._update_box_state(width=width)
 
     @_unwrap_variants
     async def _m_set_control(self, parent,
                               lemo_out: bool, fiber1_out: bool, fiber2_out: bool,
                               lemo_in: bool, light_pulse: bool):
-        def _mod(s: BoxState):
-            s.lemo_out = lemo_out;  s.fiber1_out = fiber1_out
-            s.fiber2_out = fiber2_out;  s.lemo_in = lemo_in
-            s.light_pulse = light_pulse
-        return await self._dispatch(self.connection.modify(_mod))
+        return await self._update_box_state(
+            lemo_out=lemo_out, fiber1_out=fiber1_out,
+            fiber2_out=fiber2_out, lemo_in=lemo_in,
+            light_pulse=light_pulse)
 
     @_unwrap_variants
     async def _m_configure(self, parent,
@@ -1497,8 +1498,6 @@ class CalibrationBoxServer:
         last_update_mono = 0
         last_update_wall = None
         last_state = None
-
-        _good = ua.StatusCode(ua.StatusCodes.Good)
 
         while True:
             now_mono = time.monotonic()
@@ -1566,23 +1565,19 @@ class CalibrationBoxServer:
 
             # Write all state variables on every poll cycle, even if the device is offline, so that 
             # the timestamps keep updating and the connection telemetry variables tick as expected.  
-            # When offline, the state variables will have BadNoCommunication status and retain their 
+            # When offline, the state variables will have STATUS_OFFLINE and retain their 
             # last values (which is more informative than resetting to defaults or leaving them 
             # unchanged with Good status).
             if(last_state is not None):
                 await self._apply_state(last_state, now_mono - last_update_mono, last_update_wall, now_wall)
             else:
-                await self._set_var("device_state", int(self.device_state), _good, now_wall)
+                await self._set_var("device_state", int(self.device_state), self.STATUS_GOOD, now_wall)
 
             time_since_change = now_mono - last_state_change_at
-            if self.device_state == DeviceState.Offline:
-                await self._set_var("device_connection_downtime", time_since_change, _good, now_wall)
-                await self._set_var("device_connection_uptime", 0.0, _good, now_wall)
-                await self._set_var("device_connected", False, _good, now_wall)
-            else:
-                await self._set_var("device_connection_downtime", 0.0, _good, now_wall)
-                await self._set_var("device_connection_uptime", time_since_change, _good, now_wall)
-                await self._set_var("device_connected", True, _good, now_wall)
+            offline = self.device_state == DeviceState.Offline
+            await self._set_var("device_connection_downtime", time_since_change if offline else 0.0, self.STATUS_GOOD, now_wall)
+            await self._set_var("device_connection_uptime", 0.0 if offline else time_since_change, self.STATUS_GOOD, now_wall)
+            await self._set_var("device_connected", not offline, self.STATUS_GOOD, now_wall)
 
             # Advance next_tick by the smallest number of whole intervals that
             # puts it strictly in the future, then sleep until it arrives.
@@ -1615,9 +1610,8 @@ class CalibrationBoxServer:
                 " Auto-reconnect enabled." if self.auto_reconnect
                 else " Use Reconnect method or restart with --auto-reconnect.",
             )
-        _good = ua.StatusCode(ua.StatusCodes.Good)
         now_wall = datetime.datetime.now(datetime.timezone.utc)
-        await self._set_var("device_state", int(self.device_state), _good, now_wall)
+        await self._set_var("device_state", int(self.device_state), self.STATUS_GOOD, now_wall)
 
         async with self.server:
             log.info("OPC UA server started: %s", self.server.endpoint)
