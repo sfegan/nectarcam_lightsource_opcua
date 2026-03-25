@@ -962,6 +962,16 @@ class CalibrationBoxServer:
     STATUS_OFFLINE   = ua.StatusCode(ua.StatusCodes.BadNoCommunication)
     STATUS_BAD       = ua.StatusCode(ua.StatusCodes.Bad)
 
+    # OPC UA Variant Type shortcuts
+    UA_STRING  = ua.VariantType.String
+    UA_UINT16  = ua.VariantType.UInt16
+    UA_DOUBLE  = ua.VariantType.Double
+    UA_BOOLEAN = ua.VariantType.Boolean
+    UA_INT32   = ua.VariantType.Int32
+    UA_UINT64  = ua.VariantType.UInt64
+    UA_INT64   = ua.VariantType.Int64
+    UA_FLOAT   = ua.VariantType.Float
+
     # (name, initial value, OPC UA variant type, status, description)
     # Each entry becomes a variable node at:
     #   ns=2;s=CalibrationLightSource.Monitoring.<n>
@@ -969,78 +979,78 @@ class CalibrationBoxServer:
     # once at startup; the remainder are polled live from the device.
     # Descriptions sourced from ICD MST-CAM-ICD-0328-LUPM Ed.1 Rev.3 section 3.6.
     _MONITORING_VARS: ClassVar[list[tuple]] = [
-        ("device_host",        "",      ua.VariantType.String, 
+        ("device_host",        "",      UA_STRING, 
          STATUS_GOOD,
          "IP address or hostname of the calibration light source device"),
-        ("device_port",        0,       ua.VariantType.UInt16,
+        ("device_port",        0,       UA_UINT16,
          STATUS_GOOD,
          "TCP port of the calibration light source device (port 50001 is fixed by the device firmware)"),
-        ("device_dialect",     "",      ua.VariantType.String,
+        ("device_dialect",     "",      UA_STRING,
          STATUS_GOOD,
          "Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE"),
-        ("device_polling_interval",         1.0,   ua.VariantType.Double,
+        ("device_polling_interval",         1.0,   UA_DOUBLE,
          STATUS_GOOD,
          "Configured poll interval in seconds"),
-        ("device_connection_downtime",       0.0,   ua.VariantType.Double,
+        ("device_connection_downtime",       0.0,   UA_DOUBLE,
          STATUS_GOOD,
          "Seconds since the last successful poll; 0.0 while connected (always Good status)"),
-        ("device_connection_uptime",         0.0,   ua.VariantType.Double,
+        ("device_connection_uptime",         0.0,   UA_DOUBLE,
          STATUS_GOOD,
          "Seconds since the device last came online; 0.0 while offline (always Good status)"),
-        ("device_connected",               False, ua.VariantType.Boolean,
+        ("device_connected",               False, UA_BOOLEAN,
          STATUS_GOOD,
          "True when the calibration light source is reachable over TCP; never modified by subclasses"),
-        ("device_state",          0,    ua.VariantType.Int32,
+        ("device_state",          0,    UA_INT32,
          STATUS_GOOD,
          "Server connection state: 0=Offline (not connected to device), "
          "1=Disabled (connected, light pulse off), 2=Enabled (connected, light pulse on)"),
-        ("led_mask",           8191,    ua.VariantType.UInt64,
+        ("led_mask",           8191,    UA_UINT64,
          STATUS_WAITING,
          "LED on/off bitmask: bit N = LED N+1 (bits 0-12, 13 LEDs total)"),
-        ("voltage_set",        10.0,    ua.VariantType.Double,
+        ("voltage_set",        10.0,    UA_DOUBLE,
          STATUS_WAITING,
          "LED supply voltage setpoint in V (range 7.9-16.5 V, controls brightness of LEDs 1-13)"),
-        ("voltage_actual",     10.0,    ua.VariantType.Double,
+        ("voltage_actual",     10.0,    UA_DOUBLE,
          STATUS_WAITING,
          "LED supply voltage measured by the device in V"),
-        ("duration",           0,       ua.VariantType.Int32,
+        ("duration",           0,       UA_INT32,
          STATUS_WAITING,
          "Flash duration after Start in units of 0.1 s (range 0-1023; 0 = infinite until Stop)"),
-        ("frequency_dividend", 10000.0, ua.VariantType.Double,
+        ("frequency_dividend", 10000.0, UA_DOUBLE,
          STATUS_WAITING,
          "Flash frequency dividend in Hz (range 244.16-10659.56 Hz with divider=1)"),
-        ("frequency_divider",  1,       ua.VariantType.Int32,
+        ("frequency_divider",  1,       UA_INT32,
          STATUS_WAITING,
          "Flash frequency divider ratio (range 1-3000; use > 1 for frequencies below ~300 Hz, minimum 0.1 Hz)"),
-        ("width",              1,       ua.VariantType.Int32,
+        ("width",              1,       UA_INT32,
          STATUS_WAITING,
          "Trigger output pulse width in units of 62.5 ns (range 1-1000, i.e. 62.5 ns to 62.5 us)"),
-        ("temperature",        20.0,    ua.VariantType.Double,
+        ("temperature",        20.0,    UA_DOUBLE,
          STATUS_WAITING,
          "Internal temperature of the calibration light source in degrees C"),
-        ("humidity",           50.0,    ua.VariantType.Double,
+        ("humidity",           50.0,    UA_DOUBLE,
          STATUS_WAITING,
          "Internal relative humidity in %RH (FF only; LSB = 0.04 %RH; always 50.0 for SPE/AIVFF)"),
-        ("faults",             0,       ua.VariantType.Int64,
+        ("faults",             0,       UA_INT64,
          STATUS_WAITING,
          "Fault flags bitmask: D0=power supply under-voltage (<8 V), D1=over-voltage (>30 V), "
          "D2=optical transmitter 1 fault, D3=optical transmitter 2 fault"),
-        ("light_pulse",        False,   ua.VariantType.Boolean,
+        ("light_pulse",        False,   UA_BOOLEAN,
          STATUS_WAITING,
          "Light pulse flashing active (D0 of control byte; set by Start/Stop commands)"),
-        ("lemo_out",           False,   ua.VariantType.Boolean,
+        ("lemo_out",           False,   UA_BOOLEAN,
          STATUS_WAITING,
          "LVDS trigger output active (D1 of control byte)"),
-        ("fiber1_out",         False,   ua.VariantType.Boolean,
+        ("fiber1_out",         False,   UA_BOOLEAN,
          STATUS_WAITING,
          "Optical transmitter No.1 output active (D2 of control byte)"),
-        ("fiber2_out",         False,   ua.VariantType.Boolean,
+        ("fiber2_out",         False,   UA_BOOLEAN,
          STATUS_WAITING,
          "Optical transmitter No.2 output active (D3 of control byte)"),
-        ("lemo_in",            False,   ua.VariantType.Boolean,
+        ("lemo_in",            False,   UA_BOOLEAN,
          STATUS_WAITING,
          "External LEMO trigger input active (D4 of control byte)"),
-        ("central_current",    0.0,     ua.VariantType.Double,
+        ("central_current",    0.0,     UA_DOUBLE,
          STATUS_WAITING,
          "Centre LED No.7 drive current in mA (range 0-12 mA, LSB = 38.15 nA; SPE only, always 0.0 for FF/AIVFF)"),
     ]
@@ -1309,40 +1319,40 @@ class CalibrationBoxServer:
         await add("GetStatus", self._m_get_status)
 
         await add("SetLeds",     self._m_set_leds,
-                  [a("led_mask",  ua.VariantType.Int32)])
+                  [a("led_mask",  self.UA_INT32)])
         await add("SetVoltage",  self._m_set_voltage,
-                  [a("voltage",   ua.VariantType.Float)])
+                  [a("voltage",   self.UA_FLOAT)])
         await add("SetDuration", self._m_set_duration,
-                  [a("duration",  ua.VariantType.Int32)])
+                  [a("duration",  self.UA_INT32)])
         await add("SetCurrent",  self._m_set_current,
-                  [a("current_mA", ua.VariantType.Float)])
+                  [a("current_mA", self.UA_FLOAT)])
         await add("SetWidth",    self._m_set_width,
-                  [a("width",     ua.VariantType.Int32)])
+                  [a("width",     self.UA_INT32)])
 
         await add("SetFrequency", self._m_set_frequency,
-                  [a("dividend",  ua.VariantType.Float),
-                   a("divider",   ua.VariantType.Int32)])
+                  [a("dividend",  self.UA_FLOAT),
+                   a("divider",   self.UA_INT32)])
 
         await add("SetControl", self._m_set_control,
-                  [a("lemo_out",    ua.VariantType.Boolean),
-                   a("fiber1_out",  ua.VariantType.Boolean),
-                   a("fiber2_out",  ua.VariantType.Boolean),
-                   a("lemo_in",     ua.VariantType.Boolean),
-                   a("light_pulse", ua.VariantType.Boolean)])
+                  [a("lemo_out",    self.UA_BOOLEAN),
+                   a("fiber1_out",  self.UA_BOOLEAN),
+                   a("fiber2_out",  self.UA_BOOLEAN),
+                   a("lemo_in",     self.UA_BOOLEAN),
+                   a("light_pulse", self.UA_BOOLEAN)])
 
         await add("Configure", self._m_configure,
-                  [a("led_mask",           ua.VariantType.Int32),
-                   a("voltage_set",        ua.VariantType.Float),
-                   a("duration",           ua.VariantType.Int32),
-                   a("frequency_dividend", ua.VariantType.Float),
-                   a("frequency_divider",  ua.VariantType.Int32),
-                   a("width",              ua.VariantType.Int32),
-                   a("light_pulse",        ua.VariantType.Boolean),
-                   a("lemo_out",           ua.VariantType.Boolean),
-                   a("fiber1_out",         ua.VariantType.Boolean),
-                   a("fiber2_out",         ua.VariantType.Boolean),
-                   a("lemo_in",            ua.VariantType.Boolean),
-                   a("central_current",    ua.VariantType.Float)])
+                  [a("led_mask",           self.UA_INT32),
+                   a("voltage_set",        self.UA_FLOAT),
+                   a("duration",           self.UA_INT32),
+                   a("frequency_dividend", self.UA_FLOAT),
+                   a("frequency_divider",  self.UA_INT32),
+                   a("width",              self.UA_INT32),
+                   a("light_pulse",        self.UA_BOOLEAN),
+                   a("lemo_out",           self.UA_BOOLEAN),
+                   a("fiber1_out",         self.UA_BOOLEAN),
+                   a("fiber2_out",         self.UA_BOOLEAN),
+                   a("lemo_in",            self.UA_BOOLEAN),
+                   a("central_current",    self.UA_FLOAT)])
 
     # ----------------------------------------------------------------
     # Dispatch helper and post-command status refresh
