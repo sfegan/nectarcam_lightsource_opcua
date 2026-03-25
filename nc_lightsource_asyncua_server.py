@@ -1381,22 +1381,36 @@ class CalibrationBoxServer:
 
     @_unwrap_variants
     async def _m_reconnect(self, parent):
-        await self.connection.close()
-        await asyncio.sleep(0.25)
-        log.info("Attempting reconnection to %s device %s:%d ...",
-                 self.connection.dialect.NAME, self.connection.host, self.connection.port)
-        ok, _unreachable = await self.connection.connect()
-        if ok and await self.connection.authenticate():
-            log.info("Reconnected to %s device %s:%d.",
-                    self.connection.dialect.NAME, self.connection.host, self.connection.port)
-            self.device_state = DeviceState.Disabled        
-            return await self._dispatch(self.connection.get_status())
-        log.warning("Reconnect failed -- device still offline.")
+        # Synchronize device_state immediately to prevent race with poll loop.
+        # This ensures device_state and connection.is_connected stay in agreement
+        # during the reconnect window.
         self.device_state = DeviceState.Offline
-        _good = ua.StatusCode(ua.StatusCodes.Good)
-        now_wall = datetime.datetime.now(datetime.timezone.utc)
-        await self._set_var("device_state", int(self.device_state), _good, now_wall)
-        raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
+        
+        # Acquire the connection lock to serialize reconnect with any in-flight commands.
+        # This prevents concurrent operations from trying to use the socket while we're
+        # closing and reopening it.
+        async with self.connection._lock:
+            await self.connection.close()
+            await asyncio.sleep(0.25)
+            log.info("Attempting reconnection to %s device %s:%d ...",
+                     self.connection.dialect.NAME, self.connection.host, self.connection.port)
+            ok, _unreachable = await self.connection.connect()
+            if ok and await self.connection.authenticate():
+                log.info("Reconnected to %s device %s:%d.",
+                        self.connection.dialect.NAME, self.connection.host, self.connection.port)
+                self.device_state = DeviceState.Disabled
+                # Now that we're reconnected, get_status() will acquire the lock again
+        
+        if self.device_state == DeviceState.Disabled:
+            # Successfully reconnected; fetch current state
+            return await self._dispatch(self.connection.get_status())
+        else:
+            # Reconnect failed; device_state is already Offline from the beginning
+            log.warning("Reconnect failed -- device still offline.")
+            _good = ua.StatusCode(ua.StatusCodes.Good)
+            now_wall = datetime.datetime.now(datetime.timezone.utc)
+            await self._set_var("device_state", int(self.device_state), _good, now_wall)
+            raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
 
     @_unwrap_variants
     async def _m_get_status(self, parent):
@@ -1494,6 +1508,10 @@ class CalibrationBoxServer:
 
             connected = False if self.device_state == DeviceState.Offline else True
 
+            if connected != self.connection.is_connected:
+                log.warning("Poll tick: device_state=%s, connected=%s, link=%s, now=%s",
+                      self.device_state, connected, self.connection.is_connected, now_wall)
+
             if not connected and self.auto_reconnect:
                 if now_mono < next_reconnect_attempt:
                     log.debug("Device offline, next reconnect attempt in %.0f s.",
@@ -1502,26 +1520,30 @@ class CalibrationBoxServer:
                     log.info("Attempting reconnection to %s device %s:%d ...",
                         self.connection.dialect.NAME, self.connection.host, self.connection.port)
 
-                    await self.connection.close()
-                    ok, host_unreachable = await self.connection.connect()
-
-                    if ok and await self.connection.authenticate():
-                        log.info("Reconnected to %s device %s:%d.",
-                            self.connection.dialect.NAME, self.connection.host, self.connection.port)
-                        reconnect_delay = _MIN_RECONNECT_DELAY
-                        next_reconnect_attempt = 0.0
-                        connected = True
-                    else:
-                        if host_unreachable:
-                            # Routing-level rejection – jump straight to max delay.
-                            reconnect_delay = _MAX_RECONNECT_DELAY
-                            log.warning("Host unreachable; backing off to max delay (%.0f s).",
-                                reconnect_delay)
+                    # Acquire the connection lock to serialize reconnect with any in-flight commands.
+                    # This prevents concurrent operations from trying to use the socket while we're
+                    # closing and reopening it.
+                    async with self.connection._lock:
+                        await self.connection.close()
+                        ok, host_unreachable = await self.connection.connect()
+                        
+                        if ok and await self.connection.authenticate():
+                            log.info("Reconnected to %s device %s:%d.",
+                                self.connection.dialect.NAME, self.connection.host, self.connection.port)
+                            reconnect_delay = _MIN_RECONNECT_DELAY
+                            next_reconnect_attempt = 0.0
+                            connected = True
                         else:
-                            reconnect_delay = min(reconnect_delay * 2, _MAX_RECONNECT_DELAY)
-                            log.info("Reconnect failed, next attempt in %.0f s.",
-                                reconnect_delay)
-                        next_reconnect_attempt = now_mono + reconnect_delay
+                            if host_unreachable:
+                                # Routing-level rejection – jump straight to max delay.
+                                reconnect_delay = _MAX_RECONNECT_DELAY
+                                log.warning("Host unreachable; backing off to max delay (%.0f s).",
+                                    reconnect_delay)
+                            else:
+                                reconnect_delay = min(reconnect_delay * 2, _MAX_RECONNECT_DELAY)
+                                log.info("Reconnect failed, next attempt in %.0f s.",
+                                    reconnect_delay)
+                            next_reconnect_attempt = now_mono + reconnect_delay
 
             if connected:
                 try:
@@ -1538,7 +1560,11 @@ class CalibrationBoxServer:
                     log.warning("Device went offline: %s", 
                                 "auto-reconnect enabled, will attempt reconnection" if self.auto_reconnect
                                 else "Auto-reconnect disabled, use OPCUA 'Reconnect' method to reconnect")
-                    await self.connection.close()
+                    # Only close if still connected. A concurrent reconnect may have already
+                    # closed and reopened the connection, so we check before closing.
+                    if self.connection.is_connected:
+                        async with self.connection._lock:
+                            await self.connection.close()
 
             # Write all state variables on every poll cycle, even if the device is offline, so that 
             # the timestamps keep updating and the connection telemetry variables tick as expected.  
