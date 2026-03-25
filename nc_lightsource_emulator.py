@@ -71,7 +71,7 @@ class DeviceState:
     both read / write safely.
     """
 
-    def __init__(self, product: int, release: int = 6):
+    def __init__(self, product: int, release: int = 6, _skip_threads: bool = False):
         self._lock   = threading.Lock()
         self.product = product
         self.release = release
@@ -105,7 +105,10 @@ class DeviceState:
         self._duration_timer: Optional[threading.Timer] = None
         self._voltage_ramp_thread: Optional[threading.Thread] = None
         self._voltage_ramp_stop  = threading.Event()
-        self._start_voltage_ramp()
+        
+        # Skip starting background threads for temporary instances used only for encoding
+        if not _skip_threads:
+            self._start_voltage_ramp()
 
     # ----------------------------------------------------------
     def reset(self):
@@ -211,6 +214,8 @@ class DeviceState:
         """Call on shutdown to clean up the ramp thread and any pending timers."""
         self._cancel_duration_timer()
         self._voltage_ramp_stop.set()
+        if self._voltage_ramp_thread is not None:
+            self._voltage_ramp_thread.join(timeout=2.0)
 
 
 # ==========================================================
@@ -640,9 +645,10 @@ class TcpEmulator:
     # ----------------------------------------------------------
     def _send_status(self, conn: socket.socket):
         snap = self.state.snapshot()
-        # Temporarily promote snapshot fields to DeviceState-like object
-        # by copying into a fresh DeviceState
-        st = DeviceState(self.state.product, self.state.release)
+        # Temporarily promote snapshot fields to DeviceState-like object.
+        # Use _skip_threads=True to avoid spawning background threads for this
+        # temporary encoder instance (threads only run when the real state object is created).
+        st = DeviceState(self.state.product, self.state.release, _skip_threads=True)
         for k, v in snap.items():
             if hasattr(st, k):
                 setattr(st, k, v)
