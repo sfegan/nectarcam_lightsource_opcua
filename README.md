@@ -1,129 +1,107 @@
-# NectarCAM Calibration Light Source OPC UA Server and Test Suite
+# NectarCAM Calibration Light Source OPC UA Server
 
-This repository implements a simple OPC UA server for the NectarCAM calibration light sources, based on the [MOS version written by Patrick Sizun](https://gitlab.cta-observatory.org/cta-array-elements/mst/nectarcam/software/cal/calibration-box-mos/-/tree/main?ref_type=heads).
+This repository provides an OPC UA interface for the NectarCAM calibration light sources (Flat Field and Single Photon Electron variants). It acts as a high-level bridge between the device's low-level TCP protocol and the OPC UA network, enabling standardized monitoring and control.
 
-## Components
+Derived from the [MOS version](https://gitlab.cta-observatory.org/cta-array-elements/mst/nectarcam/software/cal/calibration-box-mos/) by Patrick Sizun.
 
-The repository contains four main components:
+---
 
-1. **`nc_lightsource_asyncua_server.py`**: The OPC UA server that acts as a bridge between the socket-based protocol used by the light sources and the OPC UA network.
-2. **`nc_lightsource_asyncua_gui.py`**: A Python/TK-based GUI for sending commands and monitoring the light source via the OPC UA server.
-3. **`nc_lightsource_asyncua_test_cli.py`**: A simple test utility that provides a text interface to call OPC UA methods and read/monitor variables.
-4. **`nc_lightsource_emulator.py`**: A simple emulator for the light source that responds to commands over TCP and from the terminal.
+## 🛠 Components
 
-## Server Architecture and Functioning
+| File | Description |
+| :--- | :--- |
+| **`nc_lightsource_asyncua_server.py`** | **The Core Server.** Manages the device connection and publishes the OPC UA address space. |
+| **`nc_lightsource_asyncua_gui.py`** | A Python/Tkinter GUI for interactive control and real-time monitoring. |
+| **`nc_lightsource_asyncua_test_cli.py`** | A command-line utility for manual method calls and variable inspection. |
+| **`nc_lightsource_emulator.py`** | A hardware emulator for offline development and CI testing. |
 
-The server implements a three-layer architecture:
+---
 
-### 1. Dialect Layer
-Pure data classes that handle conversion between device state and raw bytes for different device variants:
-- **FFBoxDialect**: Flat Field source, protocol V6+ (32-byte status frame, SHT25 temperature sensor, humidity field)
-- **AIVFFBoxDialect**: AIV Flat Field source, protocol V4.5 (29-byte status frame, no humidity, different temperature sensor)
-- **SPEBoxDialect**: Single Photon Electron source, protocol V6+ (33-byte status frame, SHT25 temperature, centre-LED current)
+## 🛰 OPC UA Interface
 
-### 2. Connection Layer
-Manages the async TCP socket: connection, authentication, reconnection, flow control, and timeout. Reads fixed-size responses and verifies protocol trailers.
+All nodes are located under the root path (default: `Objects/CalibrationLightSource/`).
+**NodeId Convention:** `ns=2;s=CalibrationLightSource.[Monitoring.]<Name>`
 
-### 3. OPC UA Layer
-Builds the OPC UA address space, polls the connection layer, and exposes methods that forward commands to the device.
+### 📊 Monitoring Variables
+Located in the `Monitoring/` folder. All variables are **Read-Only**.
 
-### OPC UA Node Hierarchy
-```
-Objects/
-  CalibrationLightSource/
-    Monitoring/   -- read-only polled variables
-    Methods:      Start, Stop, Reboot, Reconnect, GetStatus,
-                  SetLeds, SetVoltage, SetDuration, SetFrequency,
-                  SetCurrent, SetWidth, SetControl, Configure
-```
+| Name | Type | Description |
+| :--- | :--- | :--- |
+| `device_connected` | Boolean | True when the TCP connection to the hardware is active. |
+| `device_state` | Int32 | 0=Offline, 1=Disabled (Idle), 2=Enabled (Pulsing). |
+| `temperature` | Double | Internal device temperature in °C. |
+| `humidity` | Double | Internal relative humidity in %RH (FF variant only). |
+| `voltage_actual` | Double | Measured LED supply voltage in V. |
+| `voltage_set` | Double | Current voltage setpoint in V (7.9–16.5V). |
+| `led_mask` | UInt64 | 13-bit mask for active LEDs (Bit N = LED N+1). |
+| `duration` | Int32 | Flash duration in 0.1s units (0 = infinite). |
+| `frequency_dividend` | Double | Timer base frequency in Hz (~244–10660 Hz). |
+| `frequency_divider` | Int32 | Frequency divider ratio (1–3000). |
+| `width` | Int32 | Trigger output pulse width in 62.5ns units. |
+| `faults` | Int64 | Bitmask: D0=Under-V, D1=Over-V, D2=Fiber1 Fail, D3=Fiber2 Fail. |
+| `light_pulse` | Boolean | Status of the internal pulsing engine (Start/Stop). |
+| `central_current` | Double | SPE center LED current in mA (0–12 mA). |
+| `device_connection_uptime`| Double | Seconds since the device last came online. |
+| `device_connection_downtime`| Double | Seconds since the last successful poll (0.0 while connected). |
 
-Node IDs follow the convention: `ns=2;s=CalibrationLightSource.<name>`
+### ⚡ Methods
+Methods are called directly on the root `CalibrationLightSource` node.
 
-## Server Arguments
+| Method | Arguments | Description |
+| :--- | :--- | :--- |
+| `Start` | - | Begins light pulsing using current settings. |
+| `Stop` | - | Immediately stops light pulsing. |
+| `GetStatus` | - | Forces an immediate refresh of all monitoring variables. |
+| `Reboot` | - | Triggers a hardware reset of the calibration box. |
+| `Reconnect` | - | Drops and re-establishes the TCP connection. |
+| `SetLeds` | `mask` (Int32) | Updates the active LED bitmask. |
+| `SetVoltage` | `voltage` (Float) | Sets the LED supply voltage (brightness). |
+| `SetFrequency`| `dividend` (Float), `divider` (Int32) | Sets the pulse repetition rate. |
+| `SetDuration` | `duration` (Int32) | Sets the automatic stop timer (0.1s units). |
+| `SetWidth` | `width` (Int32) | Sets the trigger output pulse width. |
+| `SetCurrent` | `current_mA` (Float) | Sets the SPE center LED drive current. |
+| `SetControl` | `lemo_out`, `fiber1`, `fiber2`, `lemo_in`, `pulse` | Direct control of all boolean hardware flags. |
+| `Configure` | *All parameters* | Bulk update of all device settings in a single command. |
 
-The server accepts the following command-line arguments:
+---
 
-- `--address`: Device IP address (default: "10.11.4.69")
-- `--port`: Device TCP port (default: 50001)
-- `--passwd`: Device authentication password (default: "")
-- `--product`: **Required**. Device variant: "SPE", "FF", or "AIVFF"
-- `--opcua-endpoint`: OPC UA server endpoint URL (default: "opc.tcp://0.0.0.0:4840/nectarcam/")
-- `--opcua-namespace`: OPC UA namespace URI (default: auto-generated based on product)
-- `--opcua-root`: Root object path in OPC UA address space (default: "CalibrationLightSource")
-- `--monitoring-path`: Name of monitoring object node (default: "Monitoring")
-- `--opcua-user`: OPC UA authentication (format: USER:PASS, can be specified multiple times)
-- `--log-level`: Logging level (default: "INFO", choices: DEBUG, INFO, WARNING, ERROR)
-- `--log-file`: Optional log file path (logs also go to stdout)
-- `--poll-interval`: Polling interval in seconds (default: 1.0)
-- `--auto-reconnect`: Enable automatic reconnection on connection loss
-- `--min-cmd-interval`: Minimum interval between commands in seconds (default: 0.0)
+## 🏗 Architecture
 
-## Running the Components
+The server employs a robust three-layer design:
+1.  **Dialect Layer**: Logic for encoding/decoding frames for **FF**, **AIVFF**, and **SPE** hardware variants.
+2.  **Connection Layer**: Resilient async TCP management with auto-reconnect and rate-limiting.
+3.  **OPC UA Layer**: Maps the hardware state to the `asyncua` server and manages user permissions.
 
-The components can be used together for testing. Below are the commands to run each component with example arguments.
+---
 
-### Light Source Emulator
+## 🚀 Getting Started
+
+### 1. Installation
+Ensure you have Python 3.9+ and the required dependencies:
 ```bash
-python3 nc_lightsource_emulator.py --password HELLO --log-level ERROR --product-code 0xAA
+pip install asyncua
 ```
 
-**Arguments:**
-- `--port`: TCP port to listen on (default: 50001)
-- `--product-code`: Product code (0xAA for SPE, 0xA5 for FF, default: 0xAA)
-- `--release`: Firmware release number (default: 6)
-- `--password`: Authentication password (default: none)
-- `--log-level`: Logging level (DEBUG, INFO, WARNING, ERROR, default: INFO)
-
-### OPC UA Server
+### 2. Running the Server
 ```bash
-python3 nc_lightsource_asyncua_server.py --opcua-endpoint opc.tcp://localhost:4840/nectarcam/ --address localhost --passwd HELLO --product SPE --auto-reconnect
+python nc_lightsource_asyncua_server.py --product FF --address 10.11.4.69 --auto-reconnect
 ```
 
-**Arguments:** See "Server Arguments" section above.
+**Common Arguments:**
+- `--product`: **Required.** Choose `FF` (Flat Field), `AIVFF` (V4.5), or `SPE` (Single Photon).
+- `--address`: IP of the calibration box.
+- `--auto-reconnect`: Enables exponential back-off reconnection logic.
+- `--opcua-user`: Secure the server (e.g., `--opcua-user admin:password`).
 
-### OPC UA GUI
+### 3. Local Testing (Emulator)
+You can test the entire stack on your local machine:
 ```bash
-python3 nc_lightsource_asyncua_gui.py --endpoint opc.tcp://localhost:4840/nectarcam/
+# Terminal 1: Start Emulator
+python nc_lightsource_emulator.py --product-code 0xA5
+
+# Terminal 2: Start Server
+python nc_lightsource_asyncua_server.py --product FF --address localhost --auto-reconnect
+
+# Terminal 3: Launch GUI
+python nc_lightsource_asyncua_gui.py --endpoint opc.tcp://localhost:4840/nectarcam/
 ```
-
-**Arguments:**
-- `--endpoint`: OPC UA server endpoint URL (default: "opc.tcp://localhost:4840/nectarcam/")
-- `--user`: OPC UA username (optional)
-- `--password`: OPC UA password (optional)
-
-### Test CLI
-```bash
-python3 nc_lightsource_asyncua_test_cli.py --endpoint opc.tcp://localhost:4840/nectarcam/
-```
-
-**Arguments:**
-- `--endpoint`: OPC UA server endpoint URL (default: "opc.tcp://localhost:4840/nectarcam/")
-- `--user`: OPC UA username (optional)
-- `--password`: OPC UA password (optional)
-
-## Usage Example
-
-To test the system locally:
-
-1. **Terminal 1** - Start the emulator:
-   ```bash
-   python3 nc_lightsource_emulator.py --password HELLO --product-code 0xAA
-   ```
-
-2. **Terminal 2** - Start the OPC UA server:
-   ```bash
-   python3 nc_lightsource_asyncua_server.py --product SPE --address localhost --passwd HELLO --auto-reconnect
-   ```
-
-3. **Terminal 3** - Use the GUI or CLI:
-   ```bash
-   python3 nc_lightsource_asyncua_gui.py
-   ```
-   or
-   ```bash
-   python3 nc_lightsource_asyncua_test_cli.py
-   ```
-
-
-
-
