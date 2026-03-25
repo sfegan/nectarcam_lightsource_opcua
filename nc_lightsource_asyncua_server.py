@@ -1207,12 +1207,10 @@ class CalibrationBoxServer:
                            now_time: datetime.datetime):
         """Push all BoxState fields into OPC UA monitoring nodes.
 
-        Also updates the device connection telemetry variables on every
-        successful poll (i.e. every time this method is called):
-
-          • device_connected – set True
-          • device_connection_downtime    – reset to 0.0 on each success
-          • device_connection_uptime      – ticking since the last online transition
+        Also set the status code of each variable based on the age of the state data: 
+        - Good if age is 0 (fresh data from this poll cycle)
+        - Uncertain if age is > 0 but <= 60 seconds (stale data, but device may still be online)
+        - BadNoCommunication if age is > 60 seconds (device is likely offline)
         """
 
         _good        = ua.StatusCode(ua.StatusCodes.Good)
