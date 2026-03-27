@@ -27,22 +27,35 @@ Located in the `Monitoring/` folder. All variables are **Read-Only**.
 
 | Name | Type | Description |
 | :--- | :--- | :--- |
-| `device_connected` | Boolean | True when the TCP connection to the hardware is active. |
-| `device_state` | Int32 | 0=Offline, 1=Disabled (Idle), 2=Enabled (Pulsing). |
-| `temperature` | Double | Internal device temperature in °C. |
-| `humidity` | Double | Internal relative humidity in %RH (FF variant only). |
-| `voltage_actual` | Double | Measured LED supply voltage in V. |
-| `voltage_set` | Double | Current voltage setpoint in V (7.9–16.5V). |
-| `led_mask` | UInt64 | 13-bit mask for active LEDs (Bit N = LED N+1). |
-| `duration` | Int32 | Flash duration in 0.1s units (0 = infinite). |
-| `frequency_dividend` | Double | Timer base frequency in Hz (~244–10660 Hz). |
-| `frequency_divider` | Int32 | Frequency divider ratio (1–3000). |
-| `width` | Int32 | Trigger output pulse width in 62.5ns units. |
-| `faults` | Int64 | Bitmask: D0=Under-V, D1=Over-V, D2=Fiber1 Fail, D3=Fiber2 Fail. |
-| `light_pulse` | Boolean | Status of the internal pulsing engine (Start/Stop). |
-| `central_current` | Double | SPE center LED current in mA (0–12 mA). |
-| `device_connection_uptime`| Double | Seconds since the device last came online. |
-| `device_connection_downtime`| Double | Seconds since the last successful poll (0.0 while connected). |
+| **Connection Status** |
+| `device_host` | String | IP address or hostname of the calibration light source device |
+| `device_port` | UInt16 | TCP port of the calibration light source device (port 50001 is fixed by firmware) |
+| `device_dialect` | String | Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE |
+| `device_polling_interval` | Double | Configured poll interval in milliseconds (OPC UA Duration standard) |
+| `device_connected` | Boolean | True when the TCP connection to the hardware is active |
+| `device_connection_uptime` | Double | Milliseconds since the device last came online; 0.0 while offline (OPC UA Duration standard) |
+| `device_connection_downtime` | Double | Milliseconds since the last successful poll; 0.0 while connected (OPC UA Duration standard) |
+| `device_state` | Int32 | 0=Offline (not connected), 1=Disabled (connected, idle), 2=Enabled (connected, pulsing) |
+| **LED & Pulse Configuration** |
+| `led_mask` | UInt64 | 13-bit mask for active LEDs (Bit N = LED N+1, bits 0–12) |
+| `voltage_set` | Double | Current voltage setpoint in V (range 7.9–16.5V, controls brightness of LEDs 1–13) |
+| `voltage_actual` | Double | Measured LED supply voltage in V |
+| `duration` | Int32 | Flash duration in 0.1s units (range 0–1023; 0 = infinite) |
+| `frequency_dividend` | Double | Timer base frequency in Hz (range 244.16–10659.56 Hz with divider=1) |
+| `frequency_divider` | Int32 | Frequency divider ratio (range 1–3000; use >1 for frequencies below ~300 Hz, minimum 0.1 Hz) |
+| `width` | Int32 | Trigger output pulse width in 62.5ns units (range 1–1000, i.e., 62.5 ns–62.5 µs) |
+| `light_pulse` | Boolean | Light pulse flashing active (set by Start/Stop commands) |
+| **Control Outputs** |
+| `lemo_out` | Boolean | LVDS trigger output active |
+| `fiber1_out` | Boolean | Optical transmitter No.1 output active |
+| `fiber2_out` | Boolean | Optical transmitter No.2 output active |
+| `lemo_in` | Boolean | External LEMO trigger input active |
+| **Environmental & Health** |
+| `temperature` | Double | Internal device temperature in °C |
+| `humidity` | Double | Internal relative humidity in %RH (FF only, LSB = 0.04 %RH; always 50.0 for SPE/AIVFF) |
+| `faults` | Int64 | Bitmask: D0=Under-V (<8V), D1=Over-V (>30V), D2=Optical TX 1 fault, D3=Optical TX 2 fault |
+| **SPE-Specific** |
+| `central_current` | Double | SPE center LED (No.7) current in mA (range 0–12 mA, LSB = 38.15 nA; SPE only, always 0.0 for FF/AIVFF) |
 
 ### ⚡ Methods
 Methods are called directly on the root `CalibrationLightSource` node.
@@ -87,13 +100,41 @@ pip install asyncua
 python nc_lightsource_asyncua_server.py --product FF --address 10.11.4.69 --auto-reconnect
 ```
 
-**Common Arguments:**
-- `--product`: **Required.** Choose `FF` (Flat Field), `AIVFF` (V4.5), or `SPE` (Single Photon).
-- `--address`: IP of the calibration box.
-- `--auto-reconnect`: Enables exponential back-off reconnection logic.
-- `--opcua-user`: Secure the server (e.g., `--opcua-user admin:password`).
+### 3. Command-Line Options
 
-### 3. Local Testing (Emulator)
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **Device Connection** |
+| `--product` | Required | - | **Device variant:** `FF` (Flat Field V6+), `AIVFF` (AIV Flat Field V4.5), or `SPE` (Single Photon Electron) |
+| `--address` | String | `10.11.4.69` | IP address or hostname of the calibration light source |
+| `--port` | Integer | `50001` | TCP port (fixed by device firmware) |
+| `--passwd` | String | `""` | Device authentication password (if required) |
+| `--auto-reconnect` | Flag | Off | Enable automatic reconnection with exponential back-off on connection loss |
+| `--backoff-interval` | Float | `30.0` | Maximum reconnection backoff interval in seconds |
+| `--poll-interval` | Float | `1.0` | Polling interval in seconds for device status updates |
+| `--min-cmd-interval` | Float | `0.0` | Minimum time in seconds between consecutive device commands (rate limiting) |
+| **OPC UA Server** |
+| `--opcua-endpoint` | String | `opc.tcp://0.0.0.0:4840/nectarcam/` | OPC UA server endpoint URL |
+| `--opcua-namespace` | String | Auto | OPC UA namespace URI (default: `http://cta-observatory.org/nectarcam/calibrationlightsource/<product>`). Include telescope number for multi-telescope deployments, e.g., `http://cta-observatory.org/nectarcam/1/calibrationlightsource/FF` |
+| `--opcua-root` | String | `CalibrationLightSource` | Root object path in the OPC UA address space. Dot-separated components create nested browse levels, e.g., `Camera.CalibrationLightSource` creates `Objects/Camera/CalibrationLightSource/` |
+| `--monitoring-path` | String | `Monitoring` | Name of the monitoring object node under the root |
+| `--opcua-user` | String | None | Add authenticated user (format: `USER:PASS`). Can be specified multiple times for multiple users, e.g., `--opcua-user admin:secret --opcua-user operator:pass123` |
+| **Logging** |
+| `--log-level` | Choice | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
+| `--log-file` | String | None | Write log output to this file in addition to stdout (stdout is always used for container compatibility) |
+
+**Example with Authentication:**
+```bash
+python nc_lightsource_asyncua_server.py \
+  --product SPE \
+  --address 192.168.1.100 \
+  --auto-reconnect \
+  --opcua-user admin:secure_password \
+  --opcua-user operator:readonly \
+  --log-level DEBUG
+```
+
+### 4. Local Testing (Emulator)
 You can test the entire stack on your local machine:
 ```bash
 # Terminal 1: Start Emulator
