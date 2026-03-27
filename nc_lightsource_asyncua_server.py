@@ -988,12 +988,12 @@ class CalibrationBoxServer:
          "TCP port of the calibration light source device (port 50001 is fixed by the device firmware)"),
         ("device_dialect",               "",      UA_STRING,     STATUS_GOOD,
          "Device protocol variant: FF (V6+), AIVFF (V4.5), or SPE"),
-        ("device_polling_interval",      1.0,     UA_DOUBLE,     STATUS_GOOD,
-         "Configured poll interval in seconds"),
+        ("device_polling_interval",      1000.0,  UA_DOUBLE,     STATUS_GOOD,
+         "Configured poll interval in milliseconds"),
         ("device_connection_downtime",   0.0,     UA_DOUBLE,     STATUS_GOOD,
-         "Seconds since the last successful poll; 0.0 while connected (always Good status)"),
+         "Number of milliseconds since the last successful poll; 0.0 while connected"),
         ("device_connection_uptime",     0.0,     UA_DOUBLE,     STATUS_GOOD,
-         "Seconds since the device last came online; 0.0 while offline (always Good status)"),
+         "Number of milliseconds since the device last came online; 0.0 while offline"),
         ("device_connected",             False,   UA_BOOLEAN,    STATUS_GOOD,
          "True when the calibration light source is reachable over TCP; never modified by subclasses"),
         ("device_state",                 0,       UA_INT32,      STATUS_GOOD,
@@ -1048,10 +1048,12 @@ class CalibrationBoxServer:
         poll_interval:    float = 1.0,
         auto_reconnect:   bool  = False,
         min_cmd_interval: float = 0.0,
+        backoff_interval: float = 30.0,
     ):
         self.opcua_users      = opcua_users or {}
         self.poll_interval    = poll_interval
         self.auto_reconnect   = auto_reconnect
+        self.backoff_interval = backoff_interval
         # Default namespace encodes the product; caller may override via
         # --opcua-namespace to add telescope number, site, etc.
         self.opcua_namespace  = (opcua_namespace or
@@ -1139,7 +1141,7 @@ class CalibrationBoxServer:
         await self._set_var("device_host",             self.connection.host,         self.STATUS_GOOD, now_wall)
         await self._set_var("device_port",             self.connection.port,         self.STATUS_GOOD, now_wall)
         await self._set_var("device_dialect",          self.connection.dialect.NAME, self.STATUS_GOOD, now_wall)
-        await self._set_var("device_polling_interval", self.poll_interval,           self.STATUS_GOOD, now_wall)
+        await self._set_var("device_polling_interval", self.poll_interval * 1000.0,  self.STATUS_GOOD, now_wall)
 
     # ----------------------------------------------------------------
     # Monitoring nodes
@@ -1484,7 +1486,7 @@ class CalibrationBoxServer:
         # jumps straight to the maximum – there is no value in retrying quickly
         # when the device is not reachable at the routing level.
         _MIN_RECONNECT_DELAY = self.poll_interval
-        _MAX_RECONNECT_DELAY = 30.0
+        _MAX_RECONNECT_DELAY = self.backoff_interval
         reconnect_delay          = _MIN_RECONNECT_DELAY
         next_reconnect_attempt   = 0.0   # 0 → attempt immediately on first offline tick
 
@@ -1556,7 +1558,7 @@ class CalibrationBoxServer:
             else:
                 await self._set_var("device_state", int(self.device_state), self.STATUS_GOOD, now_wall)
 
-            time_since_change = now_mono - last_state_change_at
+            time_since_change = (now_mono - last_state_change_at) * 1000.0
             offline = self.device_state == DeviceState.Offline
             await self._set_var("device_connection_downtime", time_since_change if offline else 0.0, self.STATUS_GOOD, now_wall)
             await self._set_var("device_connection_uptime", 0.0 if offline else time_since_change, self.STATUS_GOOD, now_wall)
@@ -1656,6 +1658,8 @@ def _parse_args():
                         "(stdout is always used so container log drivers capture it)")
     p.add_argument("--poll-interval",    type=float, default=1.0, metavar="SECONDS")
     p.add_argument("--auto-reconnect",   action="store_true")
+    p.add_argument("--backoff-interval", type=float, default=30.0, metavar="SECONDS",
+                   help="Maximum reconnection backoff interval in seconds (default: 30.0)")
     p.add_argument("--min-cmd-interval", type=float, default=0.0, metavar="SECONDS")
     return p.parse_args()
 
@@ -1684,6 +1688,7 @@ async def _main() -> int:
         opcua_users      = opcua_users,
         poll_interval    = args.poll_interval,
         auto_reconnect   = args.auto_reconnect,
+        backoff_interval = args.backoff_interval,
         min_cmd_interval = args.min_cmd_interval,
     )
     try:
