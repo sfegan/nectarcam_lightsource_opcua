@@ -2,6 +2,9 @@
 nc_lightsource_asyncua_gui.py
 NectarCAM Calibration Box — OPC UA GUI Client (asyncua edition)
 
+Copyright 2026, Stephen Fegan <sfegan@llr.in2p3.fr>
+Laboratoire Leprince-Ringuet, CNRS/IN2P3, Ecole Polytechnique, Institut Polytechnique de Paris
+
 Modern tkinter GUI replicating the functionality of the legacy
 Ethernet-based client, talking to the OPC UA bridge server via asyncua.
 

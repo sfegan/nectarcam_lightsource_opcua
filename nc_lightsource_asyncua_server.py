@@ -2,6 +2,9 @@
 nc_lightsource_asyncua_server.py
 NectarCAM Calibration Light Source OPC UA Server
 
+Copyright 2026, Stephen Fegan <sfegan@llr.in2p3.fr>
+Laboratoire Leprince-Ringuet, CNRS/IN2P3, Ecole Polytechnique, Institut Polytechnique de Paris
+
 Three-layer architecture
 ========================
 

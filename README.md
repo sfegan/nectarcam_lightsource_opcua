@@ -4,6 +4,9 @@ This repository provides an OPC UA interface for the NectarCAM calibration light
 
 Derived from the [MOS version](https://gitlab.cta-observatory.org/cta-array-elements/mst/nectarcam/software/cal/calibration-box-mos/) by Patrick Sizun.
 
+Copyright 2026, Stephen Fegan <sfegan@llr.in2p3.fr>
+Laboratoire Leprince-Ringuet, CNRS/IN2P3, Ecole Polytechnique, Institut Polytechnique de Paris
+
 ---
 
 ## 🛠 Components

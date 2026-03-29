@@ -2,6 +2,9 @@
 nc_lightsource_emulator.py
 NectarCAM Calibration Box  –  TCP Emulator
 
+Copyright 2026, Stephen Fegan <sfegan@llr.in2p3.fr>
+Laboratoire Leprince-Ringuet, CNRS/IN2P3, Ecole Polytechnique, Institut Polytechnique de Paris
+
 Listens on a TCP port and speaks the same binary protocol as the
 real calibration box, so that nc_lightsource_opcua_server.py can
 connect to it without any hardware present.
