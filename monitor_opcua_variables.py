@@ -81,6 +81,7 @@ class Monitor:
         self.user = user
         self.password = password
         self.variables = {} # nodeid -> {name, value, status, timestamp, node_obj}
+        self.connected = False
 
     def _unwrap_value(self, val):
         """Extract the actual value from a Variant or complex object."""
@@ -113,32 +114,43 @@ class Monitor:
 
     async def poll_all(self):
         """Poll all variables in parallel."""
+        if not self.variables:
+            return
+
         tasks = []
         node_ids = list(self.variables.keys())
         
         for nid in node_ids:
             tasks.append(self.variables[nid]["node_obj"].read_data_value(raise_on_bad_status=False))
             
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks)
         
         for nid, dv in zip(node_ids, results):
-            if isinstance(dv, Exception):
-                self.variables[nid]["value"] = f"Error: {dv}"
-                self.variables[nid]["status"] = 0x80000000
-                self.variables[nid]["timestamp"] = None
-            else:
-                self.variables[nid]["value"] = self._unwrap_value(dv.Value)
-                self.variables[nid]["status"] = dv.StatusCode.value
-                self.variables[nid]["timestamp"] = dv.SourceTimestamp or dv.ServerTimestamp or datetime.now(timezone.utc)
+            self.variables[nid]["value"] = self._unwrap_value(dv.Value)
+            self.variables[nid]["status"] = dv.StatusCode.value
+            self.variables[nid]["timestamp"] = dv.SourceTimestamp or dv.ServerTimestamp or datetime.now(timezone.utc)
 
-    def draw(self):
-        if not self.variables:
-            return
-        
+    def draw(self, error=None):
         lines = [CURSOR_HOME]
         lines.append(BOLD(f"Monitoring OPC UA Variables at {self.endpoint}"))
         lines.append(DIM(f"Path: {self.path} | Interval: {self.interval}s | Local Time: {datetime.now().strftime('%H:%M:%S')}"))
         lines.append("")
+
+        if not self.connected:
+            lines.append(YELLOW("Waiting for OPC UA server ...") + CLEAR_EOL)
+            if error:
+                lines.append(RED(f"Last Error: {error}") + CLEAR_EOL)
+            lines.append(CLEAR_EOS)
+            sys.stdout.write("\n".join(lines))
+            sys.stdout.flush()
+            return
+            
+        if not self.variables:
+            lines.append("Connected, browsing variables..." + CLEAR_EOL)
+            lines.append(CLEAR_EOS)
+            sys.stdout.write("\n".join(lines))
+            sys.stdout.flush()
+            return
         
         # Name(40), Value(25), Status(30), Timestamp(20), Age(15)
         header = f"{'Name':<40} {'Value':<25} {'Status':<30} {'Source Timestamp':<24} {'Age'}"
@@ -198,47 +210,44 @@ class Monitor:
         return current
 
     async def run(self):
-        client = Client(self.endpoint)
-        if self.user:
-            client.set_user(self.user)
-            client.set_password(self.password or "")
-
+        sys.stdout.write(CLEAR_SCREEN)
+        sys.stdout.write(HIDE_CURSOR)
+        
         try:
-            async with client:
-                print(f"Connecting to {self.endpoint} ...")
-                target_node = await self.resolve_path(client.nodes.objects, self.path)
-                
-                print(f"Browsing variables under {BOLD((await target_node.read_browse_name()).Name)} ...")
-                await self.find_variables(target_node)
-                
-                if not self.variables:
-                    print("No variables found.")
-                    return
+            while True:
+                client = Client(self.endpoint)
+                if self.user:
+                    client.set_user(self.user)
+                    client.set_password(self.password or "")
 
-                print(f"Starting poll loop (every {self.interval}s) for {len(self.variables)} variables ...")
-                await asyncio.sleep(1.0)
-
-                sys.stdout.write(CLEAR_SCREEN)
-                sys.stdout.write(HIDE_CURSOR)
-                
                 try:
-                    while True:
-                        start_time = asyncio.get_event_loop().time()
-                        await self.poll_all()
-                        self.draw()
+                    async with client:
+                        self.connected = True
+                        target_node = await self.resolve_path(client.nodes.objects, self.path)
+                        await self.find_variables(target_node)
                         
-                        elapsed = asyncio.get_event_loop().time() - start_time
-                        sleep_time = max(0.01, self.interval - elapsed)
-                        await asyncio.sleep(sleep_time)
-                except asyncio.CancelledError:
-                    pass
-                finally:
-                    sys.stdout.write(SHOW_CURSOR)
-                    print("\nMonitoring stopped.")
+                        while True:
+                            start_time = asyncio.get_event_loop().time()
+                            await self.poll_all()
+                            self.draw()
+                            
+                            elapsed = asyncio.get_event_loop().time() - start_time
+                            sleep_time = max(0.01, self.interval - elapsed)
+                            await asyncio.sleep(sleep_time)
 
-        except Exception as e:
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    raise
+                except Exception as e:
+                    self.connected = False
+                    self.variables = {}
+                    self.draw(error=str(e))
+                    await asyncio.sleep(self.interval)
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            pass
+        finally:
             sys.stdout.write(SHOW_CURSOR)
-            sys.exit(f"\nError: {e}")
+            print("\nMonitoring stopped.")
 
 def parse_args():
     p = argparse.ArgumentParser(description="Monitor OPC UA variables by polling.")
