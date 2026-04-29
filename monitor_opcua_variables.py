@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-monitor_opcua_variables.py — Subscribe to OPC UA variables and display them in a live table.
+monitor_opcua_variables.py — Poll OPC UA variables and display them in a live table.
 
 Usage:
     python3 monitor_opcua_variables.py opc.tcp://localhost:4840/nectarcam/
-    python3 monitor_opcua_variables.py opc.tcp://localhost:4840/ --path Monitoring
+    python3 monitor_opcua_variables.py opc.tcp://localhost:4840/ --path Monitoring --interval 0.5
 """
 
 import argparse
@@ -45,8 +45,7 @@ def get_status_label(status_code_int):
     sc = ua.StatusCode(status_code_int)
     name = sc.name
     
-    # Logic from initial version and browse script:
-    # Extract the descriptive name from parentheses if present.
+    # Extract descriptive name from parentheses if present
     if "(" in name and name.endswith(")"):
         name = name[name.rfind("(") + 1:-1]
     
@@ -74,38 +73,14 @@ def format_age(dt):
     if seconds < 86400: return f"{seconds // 3600}h ago"
     return f"{seconds // 86400}d ago"
 
-class SubscriptionHandler:
-    def __init__(self, update_callback):
-        self.update_callback = update_callback
-
-    def datachange_notification(self, node, val, data):
-        # asyncua behavior varies by version. 
-        # Attempt to find the DataValue object which contains Status and Timestamp.
-        datavalue = None
-        if isinstance(val, ua.DataValue):
-            datavalue = val
-        elif hasattr(data, "Value") and isinstance(data.Value, ua.DataValue):
-            datavalue = data.Value
-        elif isinstance(data, ua.DataValue):
-            datavalue = data
-        
-        if datavalue:
-            self.update_callback(node, datavalue)
-        else:
-            # Fallback for raw value updates
-            self.update_callback(node, val, is_raw=True)
-
-    def event_notification(self, event):
-        pass
-
 class Monitor:
-    def __init__(self, endpoint, path, user=None, password=None):
+    def __init__(self, endpoint, path, interval=1.0, user=None, password=None):
         self.endpoint = endpoint
         self.path = path
+        self.interval = interval
         self.user = user
         self.password = password
-        self.variables = {} # nodeid -> {name, value, status, timestamp}
-        self.updated = False
+        self.variables = {} # nodeid -> {name, value, status, timestamp, node_obj}
 
     def _unwrap_value(self, val):
         """Extract the actual value from a Variant or complex object."""
@@ -114,6 +89,7 @@ class Monitor:
         return val
 
     async def find_variables(self, node, prefix=""):
+        """Recursively find all variables under the given node."""
         try:
             children = await node.get_children()
         except Exception:
@@ -125,38 +101,35 @@ class Monitor:
             
             if node_class == ua.NodeClass.Variable:
                 full_name = f"{prefix}/{browse_name}" if prefix else browse_name
-                try:
-                    # CRITICAL: raise_on_bad_status=False ensures we get the real StatusCode 
-                    # from the server (like BadNoCommunication) instead of an exception.
-                    dv = await child.read_data_value(raise_on_bad_status=False)
-                    self.variables[child.nodeid] = {
-                        "name": full_name,
-                        "value": self._unwrap_value(dv.Value),
-                        "status": dv.StatusCode.value,
-                        "timestamp": dv.SourceTimestamp
-                    }
-                except Exception as e:
-                    self.variables[child.nodeid] = {
-                        "name": full_name,
-                        "value": f"Error: {e}",
-                        "status": 0x80000000, # Bad
-                        "timestamp": None
-                    }
+                self.variables[child.nodeid] = {
+                    "name": full_name,
+                    "value": None,
+                    "status": 0,
+                    "timestamp": None,
+                    "node_obj": child
+                }
             elif node_class == ua.NodeClass.Object:
                 await self.find_variables(child, f"{prefix}/{browse_name}" if prefix else browse_name)
 
-    def update_variable(self, node, data, is_raw=False):
-        nodeid = node.nodeid
-        if nodeid in self.variables:
-            if is_raw:
-                # data is the raw value here
-                self.variables[nodeid]["value"] = self._unwrap_value(data)
+    async def poll_all(self):
+        """Poll all variables in parallel."""
+        tasks = []
+        node_ids = list(self.variables.keys())
+        
+        for nid in node_ids:
+            tasks.append(self.variables[nid]["node_obj"].read_data_value(raise_on_bad_status=False))
+            
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for nid, dv in zip(node_ids, results):
+            if isinstance(dv, Exception):
+                self.variables[nid]["value"] = f"Error: {dv}"
+                self.variables[nid]["status"] = 0x80000000
+                self.variables[nid]["timestamp"] = None
             else:
-                # data is a DataValue object
-                self.variables[nodeid]["value"] = self._unwrap_value(data.Value)
-                self.variables[nodeid]["status"] = data.StatusCode.value
-                self.variables[nodeid]["timestamp"] = data.SourceTimestamp
-            self.updated = True
+                self.variables[nid]["value"] = self._unwrap_value(dv.Value)
+                self.variables[nid]["status"] = dv.StatusCode.value
+                self.variables[nid]["timestamp"] = dv.SourceTimestamp or dv.ServerTimestamp or datetime.now(timezone.utc)
 
     def draw(self):
         if not self.variables:
@@ -164,7 +137,7 @@ class Monitor:
         
         lines = [CURSOR_HOME]
         lines.append(BOLD(f"Monitoring OPC UA Variables at {self.endpoint}"))
-        lines.append(DIM(f"Path: {self.path} | Local Time: {datetime.now().strftime('%H:%M:%S')}"))
+        lines.append(DIM(f"Path: {self.path} | Interval: {self.interval}s | Local Time: {datetime.now().strftime('%H:%M:%S')}"))
         lines.append("")
         
         # Name(40), Value(25), Status(30), Timestamp(20), Age(15)
@@ -184,7 +157,6 @@ class Monitor:
                 val = val[:21] + "..."
             
             status_label, raw_name = get_status_label(var["status"])
-            # Manual padding because ANSI codes break field width calculation
             padding = " " * max(0, 30 - len(raw_name))
             
             ts_obj = var["timestamp"]
@@ -197,39 +169,30 @@ class Monitor:
         lines.append(CLEAR_EOS)
         sys.stdout.write("\n".join(lines))
         sys.stdout.flush()
-        self.updated = False
 
     async def resolve_path(self, root, path):
-        """Recursively find a node by name path, ignoring namespaces for ease of use."""
         if not path:
             return root
-        
         parts = path.replace(".", "/").split("/")
         current = root
-        
         for part in parts:
             if not part: continue
             found = False
-            children = await current.get_children()
-            for child in children:
-                bn = await child.read_browse_name()
-                if bn.Name == part:
+            for child in await current.get_children():
+                if (await child.read_browse_name()).Name == part:
                     current = child
                     found = True
                     break
             if not found:
-                # If not found directly, try to search recursively one level deeper
                 if current == root:
-                    for child in children:
+                    for child in await current.get_children():
                         try:
-                            deep_found = await self.resolve_path(child, part)
-                            if deep_found != child:
-                                current = deep_found
+                            deep = await self.resolve_path(child, part)
+                            if deep != child:
+                                current = deep
                                 found = True
                                 break
-                        except Exception:
-                            continue
-                
+                        except Exception: continue
                 if not found:
                     raise ValueError(f"Could not find path element: {part}")
         return current
@@ -249,25 +212,24 @@ class Monitor:
                 await self.find_variables(target_node)
                 
                 if not self.variables:
-                    print("No variables found to monitor.")
+                    print("No variables found.")
                     return
 
-                print(f"Subscribing to {len(self.variables)} variables ...")
-                handler = SubscriptionHandler(self.update_variable)
-                sub = await client.create_subscription(500, handler)
-                
-                nodes = list(self.variables.keys())
-                await sub.subscribe_data_change([client.get_node(nid) for nid in nodes])
+                print(f"Starting poll loop (every {self.interval}s) for {len(self.variables)} variables ...")
+                await asyncio.sleep(1.0)
 
-                # Start drawing loop
                 sys.stdout.write(CLEAR_SCREEN)
                 sys.stdout.write(HIDE_CURSOR)
-                self.updated = True
                 
                 try:
                     while True:
+                        start_time = asyncio.get_event_loop().time()
+                        await self.poll_all()
                         self.draw()
-                        await asyncio.sleep(0.1) 
+                        
+                        elapsed = asyncio.get_event_loop().time() - start_time
+                        sleep_time = max(0.01, self.interval - elapsed)
+                        await asyncio.sleep(sleep_time)
                 except asyncio.CancelledError:
                     pass
                 finally:
@@ -279,16 +241,17 @@ class Monitor:
             sys.exit(f"\nError: {e}")
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Monitor OPC UA variables.")
+    p = argparse.ArgumentParser(description="Monitor OPC UA variables by polling.")
     p.add_argument("endpoint", help="OPC UA endpoint")
     p.add_argument("--path", default="Monitoring", help="Path to object to monitor")
+    p.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds")
     p.add_argument("--user", help="Username")
     p.add_argument("--password", help="Password")
     return p.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    monitor = Monitor(args.endpoint, args.path, args.user, args.password)
+    monitor = Monitor(args.endpoint, args.path, args.interval, args.user, args.password)
     try:
         asyncio.run(monitor.run())
     except KeyboardInterrupt:
