@@ -290,9 +290,9 @@ class Monitor:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Monitor OPC UA variables by polling.")
-    p.add_argument("endpoint", help="OPC UA endpoint")
-    p.add_argument("--path", default="Monitoring", help="Path to object to monitor")
-    p.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds")
+    p.add_argument("endpoint", nargs="?", default="opc.tcp://localhost:4840/", help="OPC UA endpoint (default: %(default)s)")
+    p.add_argument("--path", default="Monitoring", help="Path to object to monitor (default: %(default)s)")
+    p.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds (default: %(default)s)")
     p.add_argument("--user", help="Username")
     p.add_argument("--password", help="Password")
     p.add_argument("-t", "--show-types", action="store_true", help="Show OPC UA type information")
