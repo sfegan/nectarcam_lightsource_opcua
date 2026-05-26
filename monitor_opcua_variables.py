@@ -74,14 +74,16 @@ def format_age(dt):
     return f"{seconds // 86400}d ago"
 
 class Monitor:
-    def __init__(self, endpoint, path, interval=1.0, user=None, password=None):
+    def __init__(self, endpoint, path, interval=1.0, user=None, password=None, show_types=False):
         self.endpoint = endpoint
         self.path = path
         self.interval = interval
         self.user = user
         self.password = password
+        self.show_types = show_types
         self.variables = {} # nodeid -> {name, value, status, timestamp, node_obj}
         self.connected = False
+        self.type_cache = {}
 
     def _unwrap_value(self, val):
         """Extract the actual value from a Variant or complex object."""
@@ -89,7 +91,7 @@ class Monitor:
             val = val.Value
         return val
 
-    async def find_variables(self, node, prefix=""):
+    async def find_variables(self, client, node, prefix=""):
         """Recursively find all variables under the given node."""
         try:
             children = await node.get_children()
@@ -102,15 +104,42 @@ class Monitor:
             
             if node_class == ua.NodeClass.Variable:
                 full_name = f"{prefix}/{browse_name}" if prefix else browse_name
+                
+                type_str = ""
+                if self.show_types:
+                    try:
+                        dt_id = await child.read_data_type()
+                        if dt_id not in self.type_cache:
+                            dt_node = client.get_node(dt_id)
+                            self.type_cache[dt_id] = (await dt_node.read_browse_name()).Name
+                        
+                        base_type = self.type_cache[dt_id]
+                        rank = await child.read_value_rank()
+                        if rank <= 0: # Scalar (-1) or OneOrMoreDimensions (0) but we treat as scalar if no dims
+                            type_str = base_type
+                            if rank == 0:
+                                dims = await child.read_array_dimensions()
+                                if dims:
+                                    type_str = f"{base_type}[{','.join(map(str, dims))}]"
+                        else: # Array (1), Matrix (2), etc.
+                            dims = await child.read_array_dimensions()
+                            if dims:
+                                type_str = f"{base_type}[{','.join(map(str, dims))}]"
+                            else:
+                                type_str = f"{base_type}[*]"
+                    except Exception as e:
+                        type_str = f"Error"
+
                 self.variables[child.nodeid] = {
                     "name": full_name,
                     "value": None,
                     "status": 0,
                     "timestamp": None,
-                    "node_obj": child
+                    "node_obj": child,
+                    "type_str": type_str
                 }
             elif node_class == ua.NodeClass.Object:
-                await self.find_variables(child, f"{prefix}/{browse_name}" if prefix else browse_name)
+                await self.find_variables(client, child, f"{prefix}/{browse_name}" if prefix else browse_name)
 
     async def poll_all(self):
         """Poll all variables in parallel."""
@@ -152,8 +181,11 @@ class Monitor:
             sys.stdout.flush()
             return
         
-        # Name(40), Value(25), Status(30), Timestamp(20), Age(15)
-        header = f"{'Name':<40} {'Value':<25} {'Status':<30} {'Source Timestamp':<24} {'Age'}"
+        # Name(40), Type(20), Value(25), Status(30), Timestamp(20), Age(15)
+        if self.show_types:
+            header = f"{'Name':<40} {'Type':<20} {'Value':<25} {'Status':<30} {'Source Timestamp':<24} {'Age'}"
+        else:
+            header = f"{'Name':<40} {'Value':<25} {'Status':<30} {'Source Timestamp':<24} {'Age'}"
         lines.append(BOLD(header))
         lines.append(DIM("-" * (len(header) + 10)))
 
@@ -164,6 +196,10 @@ class Monitor:
             if len(name) > 39:
                 name = "..." + name[-36:]
             
+            type_str = var.get("type_str", "")
+            if len(type_str) > 19:
+                type_str = type_str[:16] + "..."
+
             val = str(var["value"])
             if len(val) > 24:
                 val = val[:21] + "..."
@@ -175,7 +211,10 @@ class Monitor:
             ts_str = ts_obj.strftime("%H:%M:%S.%f")[:-3] if ts_obj else "N/A"
             age_str = format_age(ts_obj)
             
-            line = f"{name:<40} {val:<25} {status_label}{padding} {ts_str:<24} {age_str}"
+            if self.show_types:
+                line = f"{name:<40} {type_str:<20} {val:<25} {status_label}{padding} {ts_str:<24} {age_str}"
+            else:
+                line = f"{name:<40} {val:<25} {status_label}{padding} {ts_str:<24} {age_str}"
             lines.append(line + CLEAR_EOL)
 
         lines.append(CLEAR_EOS)
@@ -224,7 +263,7 @@ class Monitor:
                     async with client:
                         self.connected = True
                         target_node = await self.resolve_path(client.nodes.objects, self.path)
-                        await self.find_variables(target_node)
+                        await self.find_variables(client, target_node)
                         
                         while True:
                             start_time = asyncio.get_event_loop().time()
@@ -256,11 +295,12 @@ def parse_args():
     p.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds")
     p.add_argument("--user", help="Username")
     p.add_argument("--password", help="Password")
+    p.add_argument("-t", "--show-types", action="store_true", help="Show OPC UA type information")
     return p.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    monitor = Monitor(args.endpoint, args.path, args.interval, args.user, args.password)
+    monitor = Monitor(args.endpoint, args.path, args.interval, args.user, args.password, args.show_types)
     try:
         asyncio.run(monitor.run())
     except KeyboardInterrupt:
