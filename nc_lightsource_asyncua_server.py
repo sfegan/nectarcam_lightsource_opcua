@@ -1198,7 +1198,7 @@ class CalibrationBoxServer:
             await node.write_value(
                 ua.DataValue(
                     Value=ua.Variant(value, vtype),
-                    StatusCode_=status,
+                    StatusCode=status,
                     SourceTimestamp=source_timestamp))
         except Exception as exc:
             log.error("Failed to update OPC UA variable %s: %s", name, exc)
