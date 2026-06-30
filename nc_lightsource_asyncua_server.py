@@ -1350,7 +1350,7 @@ class CalibrationBoxServer:
                 await self._apply_state(state, age=0.0, state_update_time=now, now_time=now)
         except Exception as exc:
             log.warning("Command failed: %s", exc)
-            raise ua.UaStatusCodeError(self.STATUS_BAD)
+            raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
         return []
 
     # ----------------------------------------------------------------
@@ -1371,7 +1371,7 @@ class CalibrationBoxServer:
             await self.connection.reboot()
         except Exception as exc:
             log.warning("Reboot failed: %s", exc)
-            raise ua.UaStatusCodeError(self.STATUS_BAD)
+            raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
         return []
 
     @_unwrap_variants
@@ -1391,7 +1391,7 @@ class CalibrationBoxServer:
             log.warning("Reconnect failed -- device still offline.")
             now_wall = datetime.datetime.now(datetime.timezone.utc)
             await self._set_var("device_state", int(self.device_state), self.STATUS_GOOD, now_wall)
-            raise ua.UaStatusCodeError(self.STATUS_BAD)
+            raise ua.UaStatusCodeError(ua.StatusCodes.Bad)
 
     @_unwrap_variants
     async def _m_get_status(self, parent):
