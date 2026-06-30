@@ -1,1 +1,1 @@
-asyncua==1.2b1
+asyncua==2.0
