@@ -1381,11 +1381,15 @@ class CalibrationBoxServer:
         # during the reconnect window.
         self.device_state = DeviceState.Offline
         
-        ok, _unreachable = await self._attempt_reconnect()
+        ok, _unreachable, state = await self._attempt_reconnect()
         if ok:
-            self.device_state = DeviceState.Disabled
-            # Successfully reconnected; fetch current state
-            return await self._dispatch(self.connection.get_status())
+            # _attempt_reconnect() already verified the device with a real
+            # get_status() probe -- apply that result directly rather than
+            # querying the device again.
+            self.device_state = state.device_state
+            now_wall = datetime.datetime.now(datetime.timezone.utc)
+            await self._apply_state(state, age=0.0, state_update_time=now_wall, now_time=now_wall)
+            return []
         else:
             # Reconnect failed; device_state is already Offline from the beginning
             log.warning("Reconnect failed -- device still offline.")
@@ -1458,9 +1462,29 @@ class CalibrationBoxServer:
     # Poll task
     # ----------------------------------------------------------------
 
-    async def _attempt_reconnect(self) -> tuple[bool, bool]:
-        """Attempt to close and reopen the connection.
-        Returns (success, host_unreachable)."""
+    async def _attempt_reconnect(self) -> tuple[bool, bool, Optional[BoxState]]:
+        """Attempt to close, reopen, and *verify* the connection.
+
+        A bare TCP-level connect() (plus the no-op authenticate() used when
+        no password is configured) only proves that something answered the
+        SYN -- it does not prove the device is actually alive.  Some
+        embedded TCP/IP stacks will accept a brand-new connection at the
+        socket level while the firmware's command handler is still wedged
+        from a previous session, and simply never reply.  Left unchecked,
+        that looks like a successful reconnect every single poll tick,
+        which resets the back-off to its minimum forever and hammers the
+        device with a fresh connection every few seconds instead of
+        backing off.
+
+        To avoid that, after connect()/authenticate() succeed we probe with
+        a real get_status() and only report success once that comes back.
+        A device that accepts connections but never answers is therefore
+        treated the same as a device that refuses the connection outright:
+        both count as a failed reconnect attempt for back-off purposes.
+
+        Returns (success, host_unreachable, verified_state). verified_state
+        is the BoxState from the probe on success, otherwise None.
+        """
         log.info("Attempting reconnection to %s device %s:%d ...",
                  self.connection.dialect.NAME, self.connection.host, self.connection.port)
 
@@ -1470,11 +1494,29 @@ class CalibrationBoxServer:
         async with self.connection._lock:
             await self.connection.close()
             ok, host_unreachable = await self.connection.connect()
-            if ok and await self.connection.authenticate():
-                log.info("Reconnected to %s device %s:%d.",
-                         self.connection.dialect.NAME, self.connection.host, self.connection.port)
-                return True, False
-            return False, host_unreachable
+            if not ok or not await self.connection.authenticate():
+                return False, host_unreachable, None
+
+        # TCP connect (and any auth handshake) succeeded. Before declaring
+        # victory, confirm the device actually answers a real command. This
+        # runs outside the lock block above since get_status() is a
+        # @_locked_cmd method that acquires the lock itself.
+        try:
+            state = await self.connection.get_status()
+        except Exception as exc:
+            log.warning(
+                "%s device %s:%d accepted the TCP connection but did not "
+                "answer a status query (%s); treating reconnect as failed.",
+                self.connection.dialect.NAME, self.connection.host,
+                self.connection.port, exc,
+            )
+            async with self.connection._lock:
+                await self.connection.close()
+            return False, False, None
+
+        log.info("Reconnected to %s device %s:%d.",
+                 self.connection.dialect.NAME, self.connection.host, self.connection.port)
+        return True, False, state
 
     async def _poll_loop(self):
         # Phase-locked loop: track the ideal next-tick time and always sleep
@@ -1508,16 +1550,33 @@ class CalibrationBoxServer:
                 log.warning("Poll tick: device_state=%s, connected=%s, link=%s, now=%s",
                       self.device_state, connected, self.connection.is_connected, now_wall)
 
+            just_reconnected = False
+
             if not connected and self.auto_reconnect:
                 if now_mono < next_reconnect_attempt:
                     log.debug("Device offline, next reconnect attempt in %.0f s.",
                         next_reconnect_attempt - now_mono)
                 else:
-                    ok, host_unreachable = await self._attempt_reconnect()
+                    # _attempt_reconnect() itself verifies the device with a real
+                    # get_status() probe after the TCP connect, so `ok` here means
+                    # the device is genuinely responding -- not just that the
+                    # socket opened. A device that accepts the connection but
+                    # never answers therefore falls into the `else` branch below
+                    # and escalates the back-off, instead of resetting to the
+                    # minimum delay and being hammered with a new connection
+                    # attempt every poll tick.
+                    ok, host_unreachable, probed_state = await self._attempt_reconnect()
                     if ok:
                         reconnect_delay = _MIN_RECONNECT_DELAY
                         next_reconnect_attempt = 0.0
                         connected = True
+                        just_reconnected = True
+                        last_update_mono = now_mono
+                        last_update_wall = now_wall
+                        last_state = probed_state
+                        if self.device_state == DeviceState.Offline:
+                            last_state_change_at = now_mono
+                        self.device_state = probed_state.device_state
                     else:
                         if host_unreachable:
                             # Routing-level rejection – jump straight to max delay.
@@ -1530,7 +1589,7 @@ class CalibrationBoxServer:
                                 reconnect_delay)
                         next_reconnect_attempt = now_mono + reconnect_delay
 
-            if connected:
+            if connected and not just_reconnected:
                 try:
                     state = await self.connection.get_status()
                     last_update_mono = now_mono
